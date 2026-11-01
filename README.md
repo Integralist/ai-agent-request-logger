@@ -43,7 +43,7 @@ committed:
 ## How it works
 
 ```text
-Pi or Claude Code
+Any supported harness
   -> local HTTP proxy on 127.0.0.1
   -> selected model provider over HTTPS
   -> response streamed back to the harness
@@ -154,13 +154,29 @@ instead of **Anthropic**.
 See Anthropic's [Claude Code gateway guidance][claude-gateway] and [request
 header reference][claude-headers].
 
+## GitHub Copilot CLI with GPT models
+
+This route is for the terminal `copilot` command, not the VS Code Copilot
+extension. Choose **GitHub Copilot CLI**, then **GitHub subscription**. Start
+the command the logger prints; it sets `COPILOT_API_URL` to the local proxy.
+Choose a GPT model in Copilot with `copilot --model gpt-5.4` or `/model gpt-5.4`.
+
+There is a compatibility caveat: the current public Copilot CLI configuration
+docs do not list `COPILOT_API_URL`. The logger's route depends on that setting,
+so confirm that requests appear in the logs before relying on this setup. Some
+Copilot model/transport combinations use WebSockets, which this HTTP-only proxy
+cannot capture.
+
+See the [Copilot CLI configuration][copilot-config] and
+[CLI model-selection reference][copilot-cli].
+
 ## Other supported harnesses
 
-The setup wizard also includes Codex, GitHub Copilot CLI, OpenCode, OMP,
-Gemini CLI, Antigravity CLI, and Junie. **Custom base URL** supports compatible
-third-party and local model servers. Cursor CLI and Amp cannot be logged
-because their system prompts and tool definitions are built on their servers,
-not sent in requests from your machine.
+The setup wizard also includes Codex, OpenCode, OMP, Gemini CLI, Antigravity
+CLI, and Junie. **Custom base URL** supports compatible third-party and local
+model servers. Cursor CLI and Amp cannot be logged because their system prompts
+and tool definitions are built on their servers, not sent in requests from your
+machine.
 
 The proxy is HTTP-only. If a harness or model negotiates a WebSocket, that
 request cannot be captured. The logger responds with `426 Upgrade Required` so
@@ -168,3 +184,5 @@ clients that support fallback can retry over HTTP.
 
 [claude-gateway]: https://code.claude.com/docs/en/llm-gateway#subscriptions-and-gateways
 [claude-headers]: https://code.claude.com/docs/en/llm-gateway-protocol.md#request-headers
+[copilot-cli]: https://github.com/github/copilot-cli/blob/e1928292498bd60d8b8730381ed3818e82453711/_autodocs/api-reference/cli-interface.md
+[copilot-config]: https://github.com/github/copilot-cli/blob/e1928292498bd60d8b8730381ed3818e82453711/_autodocs/configuration.md
