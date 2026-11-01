@@ -7,8 +7,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"sort"
+	"slices"
+	"strconv"
 	"strings"
+)
+
+const (
+	// headerSectionFixedLineCount reserves tags and fences around rendered headers.
+	headerSectionFixedLineCount = 6
 )
 
 var redactedHeaders = map[string]bool{
@@ -36,7 +42,7 @@ func RenderMarkdown(capture Capture) string {
 }
 
 // decodeRequestBody decodes common content encodings without changing saved request bytes.
-func decodeRequestBody(body []byte, encoding string) (string, string) {
+func decodeRequestBody(body []byte, encoding string) (requestText string, warning string) {
 	switch strings.ToLower(strings.TrimSpace(encoding)) {
 	case "", "identity":
 		return string(body), ""
@@ -82,8 +88,9 @@ func renderHeaders(headers map[string][]string) string {
 	for key := range headers {
 		keys = append(keys, key)
 	}
-	sort.Strings(keys)
-	lines := []string{"<headers>", "", "```"}
+	slices.Sort(keys)
+	lines := make([]string, 0, len(keys)+headerSectionFixedLineCount)
+	lines = append(lines, "<headers>", "", "```")
 	for _, key := range keys {
 		value := strings.Join(headers[key], ", ")
 		if redactedHeaders[strings.ToLower(key)] {
@@ -100,7 +107,7 @@ func renderRequest(renderer Renderer, request any, requestText, decodeWarning st
 	if decodeWarning != "" {
 		return "[!WARNING]\n" + decodeWarning + "\n\nThe request body is preserved byte-for-byte in `.request.txt`; it is not shown here because it could be binary."
 	}
-	if renderer == RendererRaw || request == nil {
+	if request == nil {
 		return jsonOrText(request, requestText)
 	}
 	requestMap := object(request)
@@ -111,14 +118,16 @@ func renderRequest(renderer Renderer, request any, requestText, decodeWarning st
 		return renderOpenAIRequest(requestMap)
 	case RendererGemini:
 		return renderGeminiRequest(requestMap)
-	default:
+	case RendererRaw:
 		return jsonOrText(request, requestText)
+	default:
+		return fence(requestText, "")
 	}
 }
 
 // renderAnthropicRequest extracts the system prompt, tools, parameters, and messages.
 func renderAnthropicRequest(request map[string]any) string {
-	parts := renderParams(request, []string{"max_tokens", "temperature", "top_p", "top_k", "stream", "stop_sequences", "tool_choice", "thinking", "metadata"})
+	parts := renderParams(request, []string{"max_tokens", "temperature", "top_p", "top_k", "stream", "stop_sequences", "tool_choice", thinkingContentType, "metadata"})
 	if system, ok := request["system"]; ok {
 		parts = append(parts, tag("system-prompt", renderAnthropicContent(system)))
 	}
@@ -131,7 +140,7 @@ func renderAnthropicRequest(request map[string]any) string {
 
 // renderAnthropicTools formats Messages API tool schemas.
 func renderAnthropicTools(tools []any) string {
-	var rendered []string
+	rendered := make([]string, 0, len(tools))
 	for _, value := range tools {
 		tool := object(value)
 		name := stringValue(tool["name"], "(unnamed tool)")
@@ -166,10 +175,10 @@ func renderAnthropicContent(content any) string {
 	for _, raw := range blocks {
 		block := object(raw)
 		switch stringValue(block["type"], "") {
-		case "text":
-			parts = append(parts, stringValue(block["text"], ""))
-		case "thinking":
-			parts = append(parts, tag("thinking", stringValue(block["thinking"], "")))
+		case textContentType:
+			parts = append(parts, stringValue(block[textContentType], ""))
+		case thinkingContentType:
+			parts = append(parts, tag(thinkingContentType, stringValue(block[thinkingContentType], "")))
 		case "tool_use":
 			parts = append(parts, fmt.Sprintf("<tool-use name=%q id=%q>\n\n%s\n\n</tool-use>", stringValue(block["name"], ""), stringValue(block["id"], ""), fenceJSON(block["input"])))
 		case "tool_result":
@@ -204,7 +213,7 @@ func renderOpenAIRequest(request map[string]any) string {
 
 // renderOpenAITools formats function tools from either supported OpenAI request shape.
 func renderOpenAITools(tools []any) string {
-	var rendered []string
+	rendered := make([]string, 0, len(tools))
 	for _, raw := range tools {
 		tool := object(raw)
 		function := object(tool["function"])
@@ -244,7 +253,7 @@ func renderOpenAIChatMessage(raw any) string {
 	for _, call := range array(message["tool_calls"]) {
 		toolCall := object(call)
 		function := object(toolCall["function"])
-		parts = append(parts, fmt.Sprintf("<tool-use name=%q id=%q>\n\n%s\n\n</tool-use>", stringValue(function["name"], ""), stringValue(toolCall["id"], ""), fence(stringValue(function["arguments"], "{}"), "json")))
+		parts = append(parts, fmt.Sprintf("<tool-use name=%q id=%q>\n\n%s\n\n</tool-use>", stringValue(function["name"], ""), stringValue(toolCall["id"], ""), fence(stringValue(function["arguments"], "{}"), jsonLanguage)))
 	}
 	if stringValue(message["role"], "") == "tool" {
 		parts = append(parts, fmt.Sprintf("<tool-result tool-call-id=%q>\n\n%s\n\n</tool-result>", stringValue(message["tool_call_id"], ""), contentText(content)))
@@ -257,7 +266,7 @@ func renderOpenAIResponseItem(raw any) string {
 	item := object(raw)
 	switch stringValue(item["type"], "message") {
 	case "function_call":
-		return fmt.Sprintf("<tool-use name=%q id=%q>\n\n%s\n\n</tool-use>", stringValue(item["name"], ""), stringValue(item["call_id"], stringValue(item["id"], "")), fence(stringValue(item["arguments"], "{}"), "json"))
+		return fmt.Sprintf("<tool-use name=%q id=%q>\n\n%s\n\n</tool-use>", stringValue(item["name"], ""), stringValue(item["call_id"], stringValue(item["id"], "")), fence(stringValue(item["arguments"], "{}"), jsonLanguage))
 	case "function_call_output":
 		return fmt.Sprintf("<tool-result call-id=%q>\n\n%s\n\n</tool-result>", stringValue(item["call_id"], ""), contentText(item["output"]))
 	default:
@@ -329,9 +338,9 @@ func renderGeminiParts(raw any) string {
 	var parts []string
 	for _, value := range array(raw) {
 		part := object(value)
-		if text, ok := part["text"].(string); ok {
-			if part["thought"] == true {
-				parts = append(parts, tag("thinking", text))
+		if text, ok := part[textContentType].(string); ok {
+			if thought, ok := part["thought"].(bool); ok && thought {
+				parts = append(parts, tag(thinkingContentType, text))
 			} else {
 				parts = append(parts, text)
 			}
@@ -371,16 +380,23 @@ func renderResponse(renderer Renderer, body []byte) string {
 		return renderOpenAIEvents(events, raw)
 	case RendererGemini:
 		return renderGeminiEvents(events, raw)
+	case RendererRaw:
+		return renderRawSSEEvents(events, raw)
 	default:
-		var blocks []string
-		for _, event := range events {
-			blocks = append(blocks, fenceJSON(event))
-		}
-		if len(blocks) > 0 {
-			return strings.Join(blocks, "\n\n")
-		}
 		return fence(raw, "")
 	}
+}
+
+// renderRawSSEEvents shows one JSON block for every parsed event without guessing at its protocol.
+func renderRawSSEEvents(events []any, raw string) string {
+	blocks := make([]string, 0, len(events))
+	for _, event := range events {
+		blocks = append(blocks, fenceJSON(event))
+	}
+	if len(blocks) == 0 {
+		return fence(raw, "")
+	}
+	return strings.Join(blocks, "\n\n")
 }
 
 // renderAnthropicEvents rejoins text and tool input deltas from a Messages API stream.
@@ -394,7 +410,7 @@ func renderAnthropicEvents(events []any, raw string) string {
 		case "content_block_start":
 			index := intValue(event["index"])
 			block := object(event["content_block"])
-			blocks[index] = map[string]any{"type": block["type"], "text": "", "name": block["name"], "id": block["id"]}
+			blocks[index] = map[string]any{"type": block["type"], textContentType: "", "name": block["name"], "id": block["id"]}
 		case "content_block_delta":
 			index := intValue(event["index"])
 			block := blocks[index]
@@ -402,9 +418,9 @@ func renderAnthropicEvents(events []any, raw string) string {
 				continue
 			}
 			delta := object(event["delta"])
-			for _, key := range []string{"text", "partial_json", "thinking"} {
+			for _, key := range []string{textContentType, "partial_json", thinkingContentType} {
 				if text := stringValue(delta[key], ""); text != "" {
-					block["text"] = stringValue(block["text"], "") + text
+					block[textContentType] = stringValue(block[textContentType], "") + text
 				}
 			}
 		case "message_delta":
@@ -431,17 +447,17 @@ func renderAnthropicEvents(events []any, raw string) string {
 	for index := range blocks {
 		keys = append(keys, index)
 	}
-	sort.Ints(keys)
+	slices.Sort(keys)
 	for _, index := range keys {
 		block := blocks[index]
-		text := stringValue(block["text"], "")
-		switch stringValue(block["type"], "text") {
-		case "text":
+		text := stringValue(block[textContentType], "")
+		switch stringValue(block["type"], textContentType) {
+		case textContentType:
 			parts = append(parts, tag("assistant-text", text))
-		case "thinking":
-			parts = append(parts, tag("thinking", text))
+		case thinkingContentType:
+			parts = append(parts, tag(thinkingContentType, text))
 		case "tool_use":
-			parts = append(parts, fmt.Sprintf("<tool-use name=%q id=%q>\n\n%s\n\n</tool-use>", stringValue(block["name"], ""), stringValue(block["id"], ""), fence(text, "json")))
+			parts = append(parts, fmt.Sprintf("<tool-use name=%q id=%q>\n\n%s\n\n</tool-use>", stringValue(block["name"], ""), stringValue(block["id"], ""), fence(text, jsonLanguage)))
 		}
 	}
 	if len(parts) == 0 {
@@ -505,10 +521,10 @@ func renderOpenAIEvents(events []any, raw string) string {
 	for index := range tools {
 		keys = append(keys, index)
 	}
-	sort.Ints(keys)
+	slices.Sort(keys)
 	for _, index := range keys {
 		tool := tools[index]
-		parts = append(parts, fmt.Sprintf("<tool-use name=%q id=%q>\n\n%s\n\n</tool-use>", tool["name"], tool["id"], fence(defaultString(tool["arguments"], "{}"), "json")))
+		parts = append(parts, fmt.Sprintf("<tool-use name=%q id=%q>\n\n%s\n\n</tool-use>", tool["name"], tool["id"], fence(defaultString(tool["arguments"], "{}"), jsonLanguage)))
 	}
 	if len(parts) == 0 {
 		return fence(raw, "")
@@ -559,7 +575,7 @@ func renderOpenAIResponsesEvents(events []any, raw string) string {
 		parts = append(parts, tag("assistant-text", text.String()))
 	}
 	for key, tool := range tools {
-		parts = append(parts, fmt.Sprintf("<tool-use name=%q id=%q>\n\n%s\n\n</tool-use>", tool["name"], key, fence(defaultString(tool["arguments"], "{}"), "json")))
+		parts = append(parts, fmt.Sprintf("<tool-use name=%q id=%q>\n\n%s\n\n</tool-use>", tool["name"], key, fence(defaultString(tool["arguments"], "{}"), jsonLanguage)))
 	}
 	if len(parts) == 0 {
 		return fence(raw, "")
@@ -585,8 +601,8 @@ func renderGeminiEvents(events []any, raw string) string {
 			content := object(candidate["content"])
 			for _, partValue := range array(content["parts"]) {
 				part := object(partValue)
-				if value, ok := part["text"].(string); ok {
-					if part["thought"] == true {
+				if value, ok := part[textContentType].(string); ok {
+					if thought, hasThought := part["thought"].(bool); hasThought && thought {
 						thinking.WriteString(value)
 					} else {
 						text.WriteString(value)
@@ -611,7 +627,7 @@ func renderGeminiEvents(events []any, raw string) string {
 		parts = append(parts, "- **usage**: "+compactJSON(usage))
 	}
 	if thinking.Len() > 0 {
-		parts = append(parts, tag("thinking", thinking.String()))
+		parts = append(parts, tag(thinkingContentType, thinking.String()))
 	}
 	if text.Len() > 0 {
 		parts = append(parts, tag("assistant-text", text.String()))
@@ -650,11 +666,11 @@ func looksLikeSSE(raw string) bool {
 
 // renderMessageList wraps content in role-labelled XML tags.
 func renderMessageList(messages []any, renderContent func(any) string) string {
-	var rendered []string
+	rendered := make([]string, 0, len(messages))
 	for index, raw := range messages {
 		message := object(raw)
 		role := stringValue(message["role"], stringValue(message["type"], "unknown"))
-		rendered = append(rendered, fmt.Sprintf("<message index=%q role=%q>\n\n%s\n\n</message>", fmt.Sprint(index+1), role, renderContent(raw)))
+		rendered = append(rendered, fmt.Sprintf("<message index=%q role=%q>\n\n%s\n\n</message>", strconv.Itoa(index+1), role, renderContent(raw)))
 	}
 	return tag("messages", strings.Join(rendered, "\n\n"))
 }
@@ -701,7 +717,7 @@ func contentText(value any) string {
 		var parts []string
 		for _, block := range blocks {
 			item := object(block)
-			if text, ok := item["text"].(string); ok {
+			if text, ok := item[textContentType].(string); ok {
 				parts = append(parts, text)
 			} else {
 				parts = append(parts, fenceJSON(block))
@@ -721,8 +737,8 @@ func imageNote(source map[string]any) string {
 
 // object returns a map value or an empty map for a different JSON shape.
 func object(value any) map[string]any {
-	result, _ := value.(map[string]any)
-	if result == nil {
+	result, ok := value.(map[string]any)
+	if !ok || result == nil {
 		return map[string]any{}
 	}
 	return result
@@ -730,7 +746,10 @@ func object(value any) map[string]any {
 
 // array returns a JSON array or nil for another value type.
 func array(value any) []any {
-	result, _ := value.([]any)
+	result, ok := value.([]any)
+	if !ok {
+		return nil
+	}
 	return result
 }
 
@@ -745,7 +764,10 @@ func stringValue(value any, fallback string) string {
 
 // intValue converts a JSON number to an integer index.
 func intValue(value any) int {
-	number, _ := value.(float64)
+	number, ok := value.(float64)
+	if !ok {
+		return 0
+	}
 	return int(number)
 }
 

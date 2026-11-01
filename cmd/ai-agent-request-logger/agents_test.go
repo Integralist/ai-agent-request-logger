@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -27,7 +28,7 @@ func TestListAgentsPutsUnsupportedHarnessesLastKeepsUsableRoutesEasyToFind(t *te
 
 // TestResolveChoiceQuotesCodexBaseURLKeepsTheTOMLOverrideValid.
 func TestResolveChoiceQuotesCodexBaseURLKeepsTheTOMLOverrideValid(t *testing.T) {
-	target, err := ResolveChoice(AgentChoice{Agent: "codex", Provider: "chatgpt"}, 8787)
+	target, err := ResolveChoice(AgentChoice{Agent: agentCodexID, Provider: "chatgpt"}, 8787)
 	if err != nil {
 		t.Fatalf("ResolveChoice() error = %v", err)
 	}
@@ -72,7 +73,7 @@ func TestResolveCustomPiRequiresAModelPreventsBuiltInModelNamesFromLeakingToCust
 
 // TestResolveChoiceRejectsInvalidPortPreventsAnUnbindableProxyConfiguration.
 func TestResolveChoiceRejectsInvalidPortPreventsAnUnbindableProxyConfiguration(t *testing.T) {
-	_, err := ResolveChoice(AgentChoice{Agent: "pi", Provider: "anthropic"}, 70000)
+	_, err := ResolveChoice(AgentChoice{Agent: agentPiID, Provider: string(RendererAnthropic)}, 70000)
 	if err == nil {
 		t.Fatal("ResolveChoice() error = nil, want invalid port error")
 	}
@@ -93,9 +94,10 @@ func TestResolveChoiceRejectsUnknownAndUnloggableHarnessesKeepsTheWizardHonest(t
 
 // TestResolveCustomChoiceRejectsEmbeddedCredentialsPreventsAccidentalSecretStorage.
 func TestResolveCustomChoiceRejectsEmbeddedCredentialsPreventsAccidentalSecretStorage(t *testing.T) {
+	upstreamURL := (&url.URL{Scheme: "https", User: url.User("test-user"), Host: "models.example", Path: "/v1"}).String()
 	_, err := ResolveChoice(AgentChoice{
-		Agent: "claude-code", Provider: customProviderID,
-		CustomBaseURL: "https://user:secret@models.example/v1", CustomRenderer: RendererAnthropic,
+		Agent: agentClaudeCodeID, Provider: customProviderID,
+		CustomBaseURL: upstreamURL, CustomRenderer: RendererAnthropic,
 	}, 8787)
 	if err == nil {
 		t.Fatal("ResolveChoice() error = nil, want credentials-in-URL error")

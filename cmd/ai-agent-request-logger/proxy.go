@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -17,9 +18,28 @@ import (
 )
 
 const (
+	// defaultBurstThreshold caps duplicate captures without stopping request forwarding.
 	defaultBurstThreshold = 20
-	defaultBurstWindow    = 2 * time.Second
+	// defaultBurstWindow bounds the retry period used by the duplicate-capture guard.
+	defaultBurstWindow = 2 * time.Second
+	// defaultPrivateDirectoryMode keeps prompt and code captures private to the user.
+	defaultPrivateDirectoryMode os.FileMode = 0o700
+	// defaultPrivateFileMode keeps each raw and rendered capture private to the user.
+	defaultPrivateFileMode os.FileMode = 0o600
+	// defaultReadHeaderTimeout bounds time spent waiting for request headers.
+	defaultReadHeaderTimeout = 10 * time.Second
+	// defaultShutdownTimeout gives active requests a short grace period to finish.
+	defaultShutdownTimeout = 5 * time.Second
 )
+
+// shutdownTimeoutCause explains why graceful shutdown stops waiting for active requests.
+var errShutdownTimeout = errors.New("proxy: graceful shutdown timeout elapsed")
+
+// errorResponse is the JSON shape returned when a request cannot be forwarded.
+type errorResponse struct {
+	// Error describes why the proxy could not forward the request.
+	Error string `json:"error"`
+}
 
 // proxyHandler forwards one harness's requests to its configured model provider and records model turns.
 type proxyHandler struct {
@@ -71,27 +91,27 @@ func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	body, err := io.ReadAll(req.Body)
 	if err != nil {
-		p.writeError(w, http.StatusBadRequest, "failed to read request body")
-		p.logger.ErrorContext(req.Context(), "read_request_body", "err", err)
+		p.writeError(req.Context(), w, http.StatusBadRequest, "failed to read request body")
+		p.logger.LogAttrs(req.Context(), slog.LevelError, "read_request_body", slog.Any("err", err))
 		return
 	}
 	upstreamURL, err := p.upstreamURL(req.URL)
 	if err != nil {
-		p.writeError(w, http.StatusBadGateway, "invalid upstream URL")
-		p.logger.ErrorContext(req.Context(), "build_upstream_url", "err", err)
+		p.writeError(req.Context(), w, http.StatusBadGateway, "invalid upstream URL")
+		p.logger.LogAttrs(req.Context(), slog.LevelError, "build_upstream_url", slog.Any("err", err))
 		return
 	}
 	upstreamReq, err := http.NewRequestWithContext(req.Context(), req.Method, upstreamURL.String(), bytes.NewReader(body))
 	if err != nil {
-		p.writeError(w, http.StatusBadGateway, "failed to build upstream request")
-		p.logger.ErrorContext(req.Context(), "build_upstream_request", "err", err)
+		p.writeError(req.Context(), w, http.StatusBadGateway, "failed to build upstream request")
+		p.logger.LogAttrs(req.Context(), slog.LevelError, "build_upstream_request", slog.Any("err", err))
 		return
 	}
 	copyRequestHeaders(upstreamReq, req, len(body))
-	upstreamResp, err := p.client.Do(upstreamReq)
+	upstreamResp, err := p.client.Do(upstreamReq) // #nosec G704 -- the destination is validated from the user's explicit custom URL before the local listener starts.
 	if err != nil {
-		p.writeError(w, http.StatusBadGateway, "upstream request failed")
-		p.logger.ErrorContext(req.Context(), "upstream_request", "upstream", p.target.UpstreamBaseURL, "err", err)
+		p.writeError(req.Context(), w, http.StatusBadGateway, "upstream request failed")
+		p.logger.LogAttrs(req.Context(), slog.LevelError, "upstream_request", slog.String("upstream", p.target.UpstreamBaseURL), slog.Any("err", err))
 		return
 	}
 	defer upstreamResp.Body.Close()
@@ -99,7 +119,7 @@ func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	w.WriteHeader(upstreamResp.StatusCode)
 	var responseBody bytes.Buffer
 	if _, err := io.Copy(io.MultiWriter(w, &responseBody), upstreamResp.Body); err != nil {
-		p.logger.ErrorContext(req.Context(), "stream_response", "err", err)
+		p.logger.LogAttrs(req.Context(), slog.LevelError, "stream_response", slog.Any("err", err))
 		return
 	}
 	capture := Capture{
@@ -110,17 +130,17 @@ func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		ResponseBody: responseBody.Bytes(),
 	}
 	if !ShouldLogRequest(capture.Method, capture.Path, capture.Renderer) {
-		p.logger.InfoContext(req.Context(), "housekeeping_request", "method", capture.Method, "path", capture.Path, "status", capture.StatusCode)
+		p.logger.LogAttrs(req.Context(), slog.LevelInfo, "housekeeping_request", slog.String("method", capture.Method), slog.String("path", capture.Path), slog.Int("status", capture.StatusCode))
 		return
 	}
-	if !p.shouldCapture(capture) {
+	if !p.shouldCapture(req.Context(), capture) {
 		return
 	}
 	if err := p.writeCapture(capture); err != nil {
-		p.logger.ErrorContext(req.Context(), "write_capture", "err", err)
+		p.logger.LogAttrs(req.Context(), slog.LevelError, "write_capture", slog.Any("err", err))
 		return
 	}
-	p.logger.InfoContext(req.Context(), "capture_written", "path", p.captureBase(capture)+".md", "status", capture.StatusCode)
+	p.logger.LogAttrs(req.Context(), slog.LevelInfo, "capture_written", slog.String("path", p.captureBase(capture)+".md"), slog.Int("status", capture.StatusCode))
 }
 
 // upstreamURL joins the provider base path with the harness request path and query.
@@ -136,7 +156,7 @@ func (p *proxyHandler) upstreamURL(requestURL *url.URL) (*url.URL, error) {
 }
 
 // shouldCapture suppresses duplicate captures during a tight retry loop but still forwards every request.
-func (p *proxyHandler) shouldCapture(capture Capture) bool {
+func (p *proxyHandler) shouldCapture(ctx context.Context, capture Capture) bool {
 	now := time.Now()
 	key := fmt.Sprintf("%s %s %d", capture.Method, capture.Path, capture.StatusCode)
 	p.mu.Lock()
@@ -150,21 +170,21 @@ func (p *proxyHandler) shouldCapture(capture Capture) bool {
 		return true
 	}
 	if !p.burst.warned {
-		p.logger.Warn("repeated_upstream_response", "method", capture.Method, "path", capture.Path, "status", capture.StatusCode, "threshold", defaultBurstThreshold, "window", defaultBurstWindow, "message", "forwarding continues, but duplicate captures are suppressed; check the base URL, model ID, and credentials")
+		p.logger.LogAttrs(ctx, slog.LevelWarn, "repeated_upstream_response", slog.String("method", capture.Method), slog.String("path", capture.Path), slog.Int("status", capture.StatusCode), slog.Int("threshold", defaultBurstThreshold), slog.Duration("window", defaultBurstWindow), slog.String("message", "forwarding continues, but duplicate captures are suppressed; check the base URL, model ID, and credentials"))
 		p.burst.warned = true
 	}
 	if p.burst.count%500 == 0 {
-		p.logger.Info("retry_captures_suppressed", "count", p.burst.count, "path", capture.Path)
+		p.logger.LogAttrs(ctx, slog.LevelInfo, "retry_captures_suppressed", slog.Int("count", p.burst.count), slog.String("path", capture.Path))
 	}
 	return false
 }
 
 // writeCapture saves the raw exchange and a readable Markdown rendering with private file permissions.
 func (p *proxyHandler) writeCapture(capture Capture) error {
-	if err := os.MkdirAll(p.logDir, 0o700); err != nil {
+	if err := os.MkdirAll(p.logDir, defaultPrivateDirectoryMode); err != nil {
 		return fmt.Errorf("proxy: create log directory: %w", err)
 	}
-	if err := os.Chmod(p.logDir, 0o700); err != nil {
+	if err := os.Chmod(p.logDir, defaultPrivateDirectoryMode); err != nil {
 		return fmt.Errorf("proxy: restrict log directory: %w", err)
 	}
 	base := p.captureBase(capture)
@@ -186,11 +206,11 @@ func (p *proxyHandler) writeCapture(capture Capture) error {
 
 // writePrivateFile writes sensitive capture bytes after forcing private file permissions.
 func writePrivateFile(path string, body []byte) error {
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, defaultPrivateFileMode)
 	if err != nil {
 		return fmt.Errorf("open file: %w", err)
 	}
-	if err := file.Chmod(0o600); err != nil {
+	if err := file.Chmod(defaultPrivateFileMode); err != nil {
 		_ = file.Close()
 		return fmt.Errorf("restrict file permissions: %w", err)
 	}
@@ -224,10 +244,12 @@ func safeName(value string) string {
 }
 
 // writeError returns a small JSON error when the request cannot be forwarded.
-func (p *proxyHandler) writeError(w http.ResponseWriter, status int, message string) {
+func (p *proxyHandler) writeError(ctx context.Context, w http.ResponseWriter, status int, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": "ai-agent-request-logger: " + message})
+	if err := json.NewEncoder(w).Encode(errorResponse{Error: "ai-agent-request-logger: " + message}); err != nil {
+		p.logger.LogAttrs(ctx, slog.LevelError, "write_error_response", slog.Any("err", err))
+	}
 }
 
 // copyRequestHeaders preserves authentication and protocol headers while removing hop-by-hop metadata.
@@ -298,21 +320,21 @@ func requestPath(requestURL *url.URL) string {
 
 // serveUntilCancelled runs the local listener until it is stopped or fails.
 func serveUntilCancelled(ctx context.Context, address string, handler http.Handler) error {
-	server := &http.Server{Addr: address, Handler: handler, ReadHeaderTimeout: 10 * time.Second}
+	server := &http.Server{Addr: address, Handler: handler, ReadHeaderTimeout: defaultReadHeaderTimeout}
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- server.ListenAndServe()
 	}()
 	select {
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutdownCtx, cancel := context.WithTimeoutCause(context.WithoutCancel(ctx), defaultShutdownTimeout, errShutdownTimeout)
 		defer cancel()
 		if err := server.Shutdown(shutdownCtx); err != nil {
 			return fmt.Errorf("proxy: shut down listener: %w", err)
 		}
 		return nil
 	case err := <-errCh:
-		if err != nil && err != http.ErrServerClosed {
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return fmt.Errorf("proxy: listen: %w", err)
 		}
 		return nil

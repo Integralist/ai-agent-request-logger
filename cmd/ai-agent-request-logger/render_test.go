@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"compress/gzip"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -12,7 +13,7 @@ import (
 func TestRenderMarkdownShowsAnthropicPromptAndMasksCredentialsProtectsUsefulCaptures(t *testing.T) {
 	capture := Capture{
 		AgentLabel: "Claude Code", Renderer: RendererAnthropic, Timestamp: time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC),
-		Method: "POST", Path: "/v1/messages", StatusCode: 200,
+		Method: http.MethodPost, Path: anthropicMessagesPath, StatusCode: 200,
 		RequestHeaders: map[string][]string{"Authorization": {"Bearer secret-token"}, "anthropic-beta": {"oauth-capability"}},
 		RequestBody:    []byte(`{"model":"claude-sonnet","system":"Follow this policy","tools":[{"name":"read_file","description":"Read a file","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"Explain this code"}]}`),
 		ResponseBody:   []byte(`{"content":[{"type":"text","text":"I can explain it."}]}`),
@@ -70,7 +71,7 @@ func TestRawRendererDoesNotGuessAtProtocolPreservesUnknownRequestShapes(t *testi
 // TestRenderMarkdownFormatsOpenAIResponsesRequestsAndStreamsKeepsPromptsAndToolsReadable.
 func TestRenderMarkdownFormatsOpenAIResponsesRequestsAndStreamsKeepsPromptsAndToolsReadable(t *testing.T) {
 	capture := Capture{
-		AgentLabel: "Pi", Renderer: RendererOpenAI, Timestamp: time.Now().UTC(), Method: "POST",
+		AgentLabel: "Pi", Renderer: RendererOpenAI, Timestamp: time.Now().UTC(), Method: http.MethodPost,
 		Path: "/v1/responses", StatusCode: 200,
 		RequestBody: []byte(`{"model":"gpt-local","instructions":"Use tools carefully","tools":[{"type":"function","name":"read_file","description":"Read a file","parameters":{"type":"object"}}],"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"read this"}]},{"type":"function_call","call_id":"call-1","name":"read_file","arguments":"{\"path\":\"a.go\"}"}]}`),
 		ResponseBody: []byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"Answer\"}\n" +
@@ -89,7 +90,7 @@ func TestRenderMarkdownFormatsOpenAIResponsesRequestsAndStreamsKeepsPromptsAndTo
 // TestRenderMarkdownFormatsGeminiRequestsAndStreamsKeepsItsDistinctWireShapeReadable.
 func TestRenderMarkdownFormatsGeminiRequestsAndStreamsKeepsItsDistinctWireShapeReadable(t *testing.T) {
 	capture := Capture{
-		AgentLabel: "Gemini CLI", Renderer: RendererGemini, Timestamp: time.Now().UTC(), Method: "POST",
+		AgentLabel: "Gemini CLI", Renderer: RendererGemini, Timestamp: time.Now().UTC(), Method: http.MethodPost,
 		Path: "/v1/models/gemini-pro:streamGenerateContent", StatusCode: 200,
 		RequestBody:  []byte(`{"systemInstruction":{"parts":[{"text":"Follow policy"}]},"tools":[{"functionDeclarations":[{"name":"search","description":"Search docs","parameters":{"type":"object"}}]}],"contents":[{"role":"user","parts":[{"text":"find this"}]}]}`),
 		ResponseBody: []byte("data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"thinking\",\"thought\":true},{\"text\":\"answer\"},{\"functionCall\":{\"name\":\"search\",\"args\":{\"query\":\"docs\"}}}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":2}}\n"),

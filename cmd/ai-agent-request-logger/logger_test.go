@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net/http"
 	"strings"
 	"testing"
 )
@@ -14,11 +15,11 @@ func TestShouldLogRequest(t *testing.T) {
 		renderer    Renderer
 		want        bool
 	}{
-		{name: "logs an Anthropic turn", method: "POST", requestPath: "/v1/messages", renderer: RendererAnthropic, want: true},
-		{name: "skips Anthropic token counting", method: "POST", requestPath: "/v1/messages/count_tokens", renderer: RendererAnthropic, want: false},
-		{name: "skips Gemini metadata requests", method: "POST", requestPath: "/v1/models/gemini-pro:countTokens", renderer: RendererGemini, want: false},
-		{name: "logs Gemini content generation", method: "POST", requestPath: "/v1/models/gemini-pro:streamGenerateContent", renderer: RendererGemini, want: true},
-		{name: "skips non-POST probes", method: "GET", requestPath: "/v1/messages", renderer: RendererAnthropic, want: false},
+		{name: "logs an Anthropic turn", method: http.MethodPost, requestPath: anthropicMessagesPath, renderer: RendererAnthropic, want: true},
+		{name: "skips Anthropic token counting", method: http.MethodPost, requestPath: "/v1/messages/count_tokens", renderer: RendererAnthropic, want: false},
+		{name: "skips Gemini metadata requests", method: http.MethodPost, requestPath: "/v1/models/gemini-pro:countTokens", renderer: RendererGemini, want: false},
+		{name: "logs Gemini content generation", method: http.MethodPost, requestPath: "/v1/models/gemini-pro:streamGenerateContent", renderer: RendererGemini, want: true},
+		{name: "skips non-POST probes", method: http.MethodGet, requestPath: anthropicMessagesPath, renderer: RendererAnthropic, want: false},
 	}
 
 	for _, tc := range testCases {
@@ -32,7 +33,7 @@ func TestShouldLogRequest(t *testing.T) {
 
 // TestResolveChoiceBuildsClaudeCodeSSOCommand keeps the subscription-login route on Anthropic's API.
 func TestResolveChoiceBuildsClaudeCodeSSOCommand(t *testing.T) {
-	target, err := ResolveChoice(AgentChoice{Agent: "claude-code", Provider: "anthropic"}, 8787)
+	target, err := ResolveChoice(AgentChoice{Agent: agentClaudeCodeID, Provider: string(RendererAnthropic)}, 8787)
 	if err != nil {
 		t.Fatalf("ResolveChoice() error = %v", err)
 	}
@@ -49,7 +50,7 @@ func TestResolveChoiceBuildsClaudeCodeSSOCommand(t *testing.T) {
 
 // TestResolveChoiceConfiguresPiCodexForHTTPLogging requires Pi's Codex route to use SSE.
 func TestResolveChoiceConfiguresPiCodexForHTTPLogging(t *testing.T) {
-	target, err := ResolveChoice(AgentChoice{Agent: "pi", Provider: "codex"}, 8787)
+	target, err := ResolveChoice(AgentChoice{Agent: agentPiID, Provider: agentCodexID}, 8787)
 	if err != nil {
 		t.Fatalf("ResolveChoice() error = %v", err)
 	}

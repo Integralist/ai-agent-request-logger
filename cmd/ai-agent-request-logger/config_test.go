@@ -62,7 +62,7 @@ func TestAskChoiceBuildsClaudeCodeSubscriptionRouteUsesTheDocumentedSSOSetup(t *
 	if err != nil {
 		t.Fatalf("askChoice() error = %v", err)
 	}
-	if choice.Agent != "claude-code" || choice.Provider != "anthropic" || !remember {
+	if choice.Agent != agentClaudeCodeID || choice.Provider != string(RendererAnthropic) || !remember {
 		t.Errorf("askChoice() = %#v, remember %t; want Claude Code / Anthropic / remembered", choice, remember)
 	}
 }

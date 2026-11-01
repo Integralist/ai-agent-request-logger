@@ -16,12 +16,15 @@ import (
 	"syscall"
 )
 
-const defaultPort = 8787
+const (
+	// defaultPort is the local HTTP port used when the user does not choose one.
+	defaultPort = 8787
+	// startupRuleWidth controls the width of the proxy startup banner.
+	startupRuleWidth = 72
+)
 
 // runParams supplies the command inputs and streams so startup behaviour stays testable.
 type runParams struct {
-	// ctx carries process cancellation to setup and the HTTP listener.
-	ctx context.Context
 	// args contains command-line flags.
 	args []string
 	// in provides interactive setup answers.
@@ -37,7 +40,7 @@ type runParams struct {
 // main reports command failures and is the only function that sets the process exit status.
 func main() {
 	if err := execute(); err != nil {
-		slog.Error("command_failed", "err", err)
+		slog.Error("command_failed", slog.Any("err", err))
 		os.Exit(1)
 	}
 }
@@ -47,11 +50,11 @@ func execute() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	return run(runParams{ctx: ctx, args: os.Args[1:], in: os.Stdin, out: os.Stdout, errOut: os.Stderr, logger: logger})
+	return run(ctx, runParams{args: os.Args[1:], in: os.Stdin, out: os.Stdout, errOut: os.Stderr, logger: logger})
 }
 
 // run parses options, resolves the harness, and keeps its local proxy alive until cancellation.
-func run(params runParams) error {
+func run(ctx context.Context, params runParams) error {
 	flags := flag.NewFlagSet("ai-agent-request-logger", flag.ContinueOnError)
 	flags.SetOutput(params.errOut)
 	port := flags.Int("port", configuredPort(), "local HTTP port (or set PORT)")
@@ -89,7 +92,7 @@ func run(params runParams) error {
 	if found {
 		fmt.Fprintf(params.out, "Using remembered harness: %s (%s)\n", choice.Agent, choice.Provider)
 	} else {
-		choice, remember, err := askChoice(params.ctx, reader, params.out)
+		choice, remember, err := askChoice(ctx, reader, params.out)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				return fmt.Errorf("command: setup ended before a choice was entered: %w", err)
@@ -108,7 +111,7 @@ func run(params runParams) error {
 		if clearErr := clearChoice(choiceFile); clearErr != nil {
 			fmt.Fprintf(params.errOut, "Could not forget the saved selection: %v\n", clearErr)
 		}
-		choice, remember, askErr := askChoice(params.ctx, reader, params.out)
+		choice, remember, askErr := askChoice(ctx, reader, params.out)
 		if askErr != nil {
 			return askErr
 		}
@@ -138,7 +141,7 @@ func run(params runParams) error {
 	}
 	printStartup(params.out, target, *port, logDir)
 	handler := newProxyHandler(target, logDir, params.logger)
-	return serveUntilCancelled(params.ctx, fmt.Sprintf("127.0.0.1:%d", *port), handler)
+	return serveUntilCancelled(ctx, fmt.Sprintf("127.0.0.1:%d", *port), handler)
 }
 
 // configuredPort reads PORT or falls back to the standard local listener port.
@@ -157,12 +160,12 @@ func configuredPort() int {
 // printStartup explains the resolved route and the exact setup needed to start the harness.
 func printStartup(out io.Writer, target Target, port int, logDir string) {
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, strings.Repeat("-", 72))
+	fmt.Fprintln(out, strings.Repeat("-", startupRuleWidth))
 	fmt.Fprintf(out, "Agent:     %s (%s)\n", target.AgentLabel, target.ProviderLabel)
 	fmt.Fprintf(out, "Listening: http://localhost:%d\n", port)
 	fmt.Fprintf(out, "Forwards:  %s\n", target.UpstreamBaseURL)
 	fmt.Fprintf(out, "Logs:      %s\n", logDir)
-	fmt.Fprintln(out, strings.Repeat("-", 72))
+	fmt.Fprintln(out, strings.Repeat("-", startupRuleWidth))
 	for _, file := range target.Setup {
 		fmt.Fprintf(out, "\nMerge this %s snippet into %s:\n\n%s\n", file.Language, file.Path, file.Body)
 	}

@@ -15,7 +15,24 @@ import (
 	"time"
 )
 
-const modelDiscoveryTimeout = 3 * time.Second
+const (
+	// customProviderOptionCount accounts for the custom and other menu choices.
+	customProviderOptionCount = 2
+	// modelDiscoveryTimeout bounds unauthenticated model discovery.
+	modelDiscoveryTimeout = 3 * time.Second
+)
+
+// discoveredModelsResponse is the OpenAI-compatible model-list response shape.
+type discoveredModelsResponse struct {
+	// Data contains models announced by the endpoint.
+	Data []discoveredModel `json:"data"`
+}
+
+// discoveredModel contains the stable identifier offered by the endpoint.
+type discoveredModel struct {
+	// ID is the model name accepted by the upstream server.
+	ID string `json:"id"`
+}
 
 // choicePath locates the remembered harness choice in the user's config directory.
 func choicePath() (string, error) {
@@ -36,23 +53,20 @@ func loadChoice(path string) (AgentChoice, bool, error) {
 		return AgentChoice{}, false, fmt.Errorf("config: read choice: %w", err)
 	}
 	var choice AgentChoice
-	if err := json.Unmarshal(data, &choice); err != nil || choice.Agent == "" {
-		return AgentChoice{}, false, nil
+	if err := json.Unmarshal(data, &choice); err == nil && choice.Agent != "" {
+		return choice, true, nil
 	}
-	return choice, true, nil
+	return AgentChoice{}, false, nil
 }
 
 // saveChoice stores only the selected harness and custom-target details with private permissions.
 func saveChoice(path string, choice AgentChoice) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), defaultPrivateDirectoryMode); err != nil {
 		return fmt.Errorf("config: create choice directory: %w", err)
 	}
-	data, err := json.MarshalIndent(choice, "", "  ")
-	if err != nil {
-		return fmt.Errorf("config: encode choice: %w", err)
-	}
+	data, _ := json.MarshalIndent(choice, "", "  ")
 	data = append(data, '\n')
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	if err := os.WriteFile(path, data, defaultPrivateFileMode); err != nil {
 		return fmt.Errorf("config: write choice: %w", err)
 	}
 	return nil
@@ -98,7 +112,7 @@ func askChoice(ctx context.Context, reader *bufio.Reader, out io.Writer) (AgentC
 		return askCustomChoice(ctx, reader, out, choice)
 	}
 
-	providerOptions := make([]string, 0, len(agent.providers)+2)
+	providerOptions := make([]string, 0, len(agent.providers)+customProviderOptionCount)
 	for _, provider := range agent.providers {
 		providerOptions = append(providerOptions, provider.label)
 	}
@@ -238,11 +252,7 @@ func discoverModelIDs(ctx context.Context, baseURL string) []string {
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		return nil
 	}
-	var payload struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
-	}
+	var payload discoveredModelsResponse
 	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
 		return nil
 	}
@@ -260,5 +270,5 @@ func discoverModelIDs(ctx context.Context, baseURL string) []string {
 
 // agentNeedsModel reports which custom providers require an explicit model entry.
 func agentNeedsModel(agentID string, renderer Renderer) bool {
-	return agentID == "pi" || (agentID == "opencode" && renderer == RendererOpenAI)
+	return agentID == agentPiID || (agentID == agentOpenCodeID && renderer == RendererOpenAI)
 }

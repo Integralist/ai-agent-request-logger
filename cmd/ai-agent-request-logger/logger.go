@@ -2,9 +2,39 @@ package main
 
 import (
 	"fmt"
+	"net/http"
 	"regexp"
 	"strings"
 	"time"
+)
+
+const (
+	// agentClaudeCodeID identifies Claude Code in saved selections and captures.
+	agentClaudeCodeID = "claude-code"
+	// agentCodexID identifies Codex in saved selections and captures.
+	agentCodexID = "codex"
+	// agentJunieID identifies Junie in saved selections and captures.
+	agentJunieID = "junie"
+	// agentOpenCodeID identifies OpenCode in saved selections and captures.
+	agentOpenCodeID = "opencode"
+	// agentPiID identifies Pi in saved selections and captures.
+	agentPiID = "pi"
+	// anthropicMessagesPath is the normal Anthropic Messages API path.
+	anthropicMessagesPath = "/v1/messages"
+	// anthropicProviderLabel is the provider's label in the setup wizard.
+	anthropicProviderLabel = "Anthropic"
+	// baseURLPlaceholder marks a URL inserted into generated configuration.
+	baseURLPlaceholder = "{baseUrl}"
+	// codexBaseURLOverrideArgument is Codex's TOML override passed to one run.
+	codexBaseURLOverrideArgument = `openai_base_url="{baseUrl}"`
+	// jsonLanguage identifies JSON configuration snippets and fences.
+	jsonLanguage = "json"
+	// openAIAPIPrefix is the shared OpenAI-compatible API URL prefix.
+	openAIAPIPrefix = "/v1"
+	// textContentType identifies a text block in provider request bodies.
+	textContentType = "text"
+	// thinkingContentType identifies a reasoning block in provider request bodies.
+	thinkingContentType = "thinking"
 )
 
 // Renderer identifies the API request shape used for readable captures.
@@ -99,7 +129,7 @@ type Capture struct {
 
 // ShouldLogRequest excludes probes and provider housekeeping calls from captures.
 func ShouldLogRequest(method, requestPath string, renderer Renderer) bool {
-	if !strings.EqualFold(method, "POST") {
+	if !strings.EqualFold(method, http.MethodPost) {
 		return false
 	}
 	if renderer == RendererGemini {

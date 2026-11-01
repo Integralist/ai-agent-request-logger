@@ -11,6 +11,11 @@ import (
 	"time"
 )
 
+const (
+	// testInsecureFileMode lets the permission test simulate an unsafe existing capture.
+	testInsecureFileMode os.FileMode = 0o644
+)
+
 // TestProxyForwardsAuthAndCapturesModelRequestProtectsTheSSOHeaderAndCaptureContract.
 func TestProxyForwardsAuthAndCapturesModelRequestProtectsTheSSOHeaderAndCaptureContract(t *testing.T) {
 	const requestBody = `{"model":"claude-3","system":"follow policy","tools":[{"name":"read","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"hello"}]}`
@@ -24,7 +29,7 @@ func TestProxyForwardsAuthAndCapturesModelRequestProtectsTheSSOHeaderAndCaptureC
 		receivedHost = req.Host
 		receivedPath = req.URL.Path + "?" + req.URL.RawQuery
 		receivedAuth = req.Header.Get("Authorization")
-		receivedBeta = req.Header.Get("anthropic-beta")
+		receivedBeta = req.Header.Get("Anthropic-Beta")
 		body, err := io.ReadAll(req.Body)
 		if err != nil {
 			t.Errorf("read forwarded body: %v", err)
@@ -36,11 +41,11 @@ func TestProxyForwardsAuthAndCapturesModelRequestProtectsTheSSOHeaderAndCaptureC
 	defer upstream.Close()
 
 	logDir := t.TempDir()
-	target := Target{AgentID: "claude-code", AgentLabel: "Claude Code", UpstreamBaseURL: upstream.URL + "/gateway", Renderer: RendererAnthropic}
+	target := Target{AgentID: agentClaudeCodeID, AgentLabel: "Claude Code", UpstreamBaseURL: upstream.URL + "/gateway", Renderer: RendererAnthropic}
 	handler := newProxyHandler(target, logDir, nil)
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "http://logger.local/v1/messages?beta=true", strings.NewReader(requestBody))
 	req.Header.Set("Authorization", "Bearer enterprise-session-token")
-	req.Header.Set("anthropic-beta", "oauth-2025-04-20")
+	req.Header.Set("Anthropic-Beta", "oauth-2025-04-20")
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
 
@@ -156,17 +161,17 @@ func TestProxyReturnsBadGatewayWhenProviderIsUnavailableKeepsConnectionFailuresV
 // TestRetryBurstGuardSuppressesOnlyRapidDuplicateCapturesStopsDiskGrowth.
 func TestRetryBurstGuardSuppressesOnlyRapidDuplicateCapturesStopsDiskGrowth(t *testing.T) {
 	handler := newProxyHandler(Target{}, t.TempDir(), nil)
-	capture := Capture{Method: http.MethodPost, Path: "/v1/messages", StatusCode: http.StatusUnauthorized}
+	capture := Capture{Method: http.MethodPost, Path: anthropicMessagesPath, StatusCode: http.StatusUnauthorized}
 	for range defaultBurstThreshold {
-		if !handler.shouldCapture(capture) {
+		if !handler.shouldCapture(t.Context(), capture) {
 			t.Fatal("burst guard suppressed a request before the threshold")
 		}
 	}
-	if handler.shouldCapture(capture) {
+	if handler.shouldCapture(t.Context(), capture) {
 		t.Fatal("burst guard captured a duplicate after the threshold")
 	}
 	capture.Path = "/v1/other"
-	if !handler.shouldCapture(capture) {
+	if !handler.shouldCapture(t.Context(), capture) {
 		t.Fatal("burst guard suppressed a new request path")
 	}
 }
@@ -191,7 +196,7 @@ func TestWriteCaptureRestrictsExistingPathsProtectsPreviouslyCreatedCaptureFiles
 	}
 	timestamp := time.Date(2026, 8, 6, 12, 0, 0, 123000000, time.UTC)
 	requestPath := filepath.Join(logDir, "2026-08-06T12-00-00.123000000_pi.request.txt")
-	if err := os.WriteFile(requestPath, []byte("old capture"), 0o644); err != nil {
+	if err := os.WriteFile(requestPath, []byte("old capture"), testInsecureFileMode); err != nil { // #nosec G306 -- this test creates a permissive file to verify the writer hardens it.
 		t.Fatalf("create existing capture: %v", err)
 	}
 	handler := newProxyHandler(Target{AgentID: "pi", AgentLabel: "Pi", Renderer: RendererRaw}, logDir, nil)
