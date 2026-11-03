@@ -92,7 +92,8 @@ func run(ctx context.Context, params runParams) error {
 	if found {
 		fmt.Fprintf(params.out, "Using remembered harness: %s (%s)\n", choice.Agent, choice.Provider)
 	} else {
-		choice, remember, err := askChoice(ctx, reader, params.out)
+		var remember bool
+		choice, remember, err = askChoice(ctx, reader, params.out)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				return fmt.Errorf("command: setup ended before a choice was entered: %w", err)

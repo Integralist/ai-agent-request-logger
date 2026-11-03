@@ -1,6 +1,8 @@
 package main
 
 import (
+	"net"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -18,6 +20,37 @@ func TestRunHelpDisplaysUsageWithoutStartingTheWizardMakesTheCLIDiscoverable(t *
 	}
 	if !strings.Contains(errorOutput.String(), "Usage of ai-agent-request-logger") {
 		t.Errorf("help output = %q, want usage text", errorOutput.String())
+	}
+}
+
+// TestRunStartsFirstTimePiChoiceUsesTheSelectionInsteadOfAnEmptyOuterValue.
+func TestRunStartsFirstTimePiChoiceUsesTheSelectionInsteadOfAnEmptyOuterValue(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve listener port: %v", err)
+	}
+	defer listener.Close()
+	_, portValue, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatalf("parse listener port: %v", err)
+	}
+	port, err := strconv.Atoi(portValue)
+	if err != nil {
+		t.Fatalf("convert listener port: %v", err)
+	}
+
+	var output strings.Builder
+	var errorOutput strings.Builder
+	err = run(t.Context(), runParams{
+		args: []string{"--force", "--port", strconv.Itoa(port)}, in: strings.NewReader("5\n2\ny\n"),
+		out: &output, errOut: &errorOutput,
+	})
+	if !strings.Contains(output.String(), "Agent:     Pi (GitHub Copilot subscription)") {
+		t.Fatalf("output = %q, want startup banner for selected Pi Copilot route", output.String())
+	}
+	if err == nil || !strings.Contains(err.Error(), "proxy: listen:") {
+		t.Errorf("run() error = %v, want the expected occupied-port listener error", err)
 	}
 }
 
