@@ -46,8 +46,8 @@ func TestRunStartsFirstTimePiChoiceUsesTheSelectionInsteadOfAnEmptyOuterValue(t 
 		args: []string{"--force", "--port", strconv.Itoa(port)}, in: strings.NewReader("5\n2\ny\n"),
 		out: &output, errOut: &errorOutput,
 	})
-	if !strings.Contains(output.String(), "Agent:     Pi (GitHub Copilot subscription)") {
-		t.Fatalf("output = %q, want startup banner for selected Pi Copilot route", output.String())
+	if !strings.Contains(output.String(), "Agent:     Pi (OpenAI API key)") {
+		t.Fatalf("output = %q, want startup banner for selected Pi OpenAI route", output.String())
 	}
 	if err == nil || !strings.Contains(err.Error(), "proxy: listen:") {
 		t.Errorf("run() error = %v, want the expected occupied-port listener error", err)

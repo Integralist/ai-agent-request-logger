@@ -95,13 +95,14 @@ Choose **Pi**, then **OpenAI API key**. The generated `openai` provider uses
 `http://localhost:8787/v1`. Keep your API key in Pi's usual auth setup; do not
 put it in this file or in the README.
 
-### GitHub Copilot subscription
+### GitHub Copilot models
 
-Choose **Pi**, then **GitHub Copilot subscription**. Merge the generated
-`github-copilot` provider snippet into `~/.pi/agent/models.json`. Pi keeps its
-existing GitHub Copilot authentication and sends requests through the logger to
-`api.individual.githubcopilot.com`. The readable request view is intended for
-OpenAI-compatible Copilot models.
+Pi's GitHub Copilot OAuth provider derives its upstream URL from the Copilot
+token. Pi uses that OAuth-provided URL for requests, overriding the
+`providers.github-copilot.baseUrl` setting in `~/.pi/agent/models.json`. A local
+proxy URL in that setting therefore does not route Pi's Copilot requests through
+the logger. The logger does not offer this Pi provider. This limitation is
+specific to Pi; the separate GitHub Copilot CLI route below is unchanged.
 
 ### ChatGPT subscription (Codex)
 

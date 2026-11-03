@@ -67,19 +67,19 @@ func TestAskChoiceBuildsClaudeCodeSubscriptionRouteUsesTheDocumentedSSOSetup(t *
 	}
 }
 
-// TestAskChoiceOffersPiGitHubCopilotMakesTheProviderSelectableInTheWizard.
-func TestAskChoiceOffersPiGitHubCopilotMakesTheProviderSelectableInTheWizard(t *testing.T) {
-	input := bufio.NewReader(strings.NewReader("5\n2\ny\n"))
+// TestAskChoiceOmitsPiGitHubCopilotAvoidsOfferingAProviderThatCannotBeRedirected.
+func TestAskChoiceOmitsPiGitHubCopilotAvoidsOfferingAProviderThatCannotBeRedirected(t *testing.T) {
+	input := bufio.NewReader(strings.NewReader("5\n1\ny\n"))
 	var output strings.Builder
 	choice, remember, err := askChoice(t.Context(), input, &output)
 	if err != nil {
 		t.Fatalf("askChoice() error = %v", err)
 	}
-	if choice.Agent != agentPiID || choice.Provider != "github-copilot" || !remember {
-		t.Errorf("askChoice() = %#v, remember %t; want Pi / GitHub Copilot / remembered", choice, remember)
+	if choice.Agent != agentPiID || choice.Provider != string(RendererAnthropic) || !remember {
+		t.Errorf("askChoice() = %#v, remember %t; want Pi / Anthropic / remembered", choice, remember)
 	}
-	if !strings.Contains(output.String(), "GitHub Copilot subscription") {
-		t.Errorf("wizard output = %q, want GitHub Copilot subscription option", output.String())
+	if strings.Contains(output.String(), "GitHub Copilot subscription") {
+		t.Errorf("wizard output = %q, must not offer the unsupported GitHub Copilot provider", output.String())
 	}
 }
 
@@ -92,7 +92,7 @@ func TestAskChoiceDiscoversTheOnlyCustomPiModelAvoidsAnUnnecessarySelectionPromp
 		_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]string{{"id": "local-qwen"}}})
 	}))
 	defer server.Close()
-	input := bufio.NewReader(strings.NewReader("5\n5\n" + server.URL + "\n1\ny\n"))
+	input := bufio.NewReader(strings.NewReader("5\n4\n" + server.URL + "\n1\ny\n"))
 	var output strings.Builder
 	choice, remember, err := askChoice(t.Context(), input, &output)
 	if err != nil {

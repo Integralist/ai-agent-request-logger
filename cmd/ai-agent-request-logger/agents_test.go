@@ -71,23 +71,11 @@ func TestResolveCustomPiRequiresAModelPreventsBuiltInModelNamesFromLeakingToCust
 	}
 }
 
-// TestResolvePiGitHubCopilotRoutesTheExistingProviderThroughTheLogger.
-func TestResolvePiGitHubCopilotRoutesTheExistingProviderThroughTheLogger(t *testing.T) {
-	target, err := ResolveChoice(AgentChoice{Agent: agentPiID, Provider: "github-copilot"}, 8787)
-	if err != nil {
-		t.Fatalf("ResolveChoice() error = %v", err)
-	}
-	if target.UpstreamHost != "api.individual.githubcopilot.com" {
-		t.Errorf("upstream host = %q, want api.individual.githubcopilot.com", target.UpstreamHost)
-	}
-	if target.Renderer != RendererOpenAI {
-		t.Errorf("renderer = %q, want %q", target.Renderer, RendererOpenAI)
-	}
-	if target.BaseURL != "http://localhost:8787" {
-		t.Errorf("local base URL = %q, want http://localhost:8787", target.BaseURL)
-	}
-	if len(target.Setup) != 1 || !strings.Contains(target.Setup[0].Body, `"github-copilot"`) || !strings.Contains(target.Setup[0].Body, `"baseUrl": "http://localhost:8787"`) {
-		t.Errorf("Pi setup does not override the GitHub Copilot provider: %#v", target.Setup)
+// TestResolvePiRejectsGitHubCopilotProviderAvoidsAdvertisingAnIneffectiveRoute.
+func TestResolvePiRejectsGitHubCopilotProviderAvoidsAdvertisingAnIneffectiveRoute(t *testing.T) {
+	_, err := ResolveChoice(AgentChoice{Agent: agentPiID, Provider: "github-copilot"}, 8787)
+	if err == nil {
+		t.Fatal("ResolveChoice() error = nil, want unsupported Pi GitHub Copilot provider")
 	}
 }
 
