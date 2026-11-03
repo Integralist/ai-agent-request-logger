@@ -203,6 +203,7 @@ func buildAgentCatalogue() []agentEntry {
 			id: agentPiID, label: "Pi",
 			providers: []providerEntry{
 				{id: string(RendererAnthropic), label: anthropicProviderLabel, host: "api.anthropic.com", renderer: RendererAnthropic, binary: agentPiID, setup: []SetupFile{piModels(string(RendererAnthropic), baseURLPlaceholder, "")}, customFor: []Renderer{RendererAnthropic}, notes: []string{"Pi has no base-URL flag, so ~/.pi/agent/models.json points its Anthropic provider at the proxy."}},
+				{id: "github-copilot", label: "GitHub Copilot subscription", host: "api.individual.githubcopilot.com", renderer: RendererOpenAI, binary: agentPiID, setup: []SetupFile{piModels("github-copilot", baseURLPlaceholder, "")}, notes: []string{"Keeps Pi's GitHub Copilot authentication and targets the individual Copilot API. Use an OpenAI-compatible Copilot model for the readable request view."}},
 				{id: string(RendererOpenAI), label: "OpenAI API key", host: "api.openai.com", renderer: RendererOpenAI, suffix: openAIAPIPrefix, binary: agentPiID, setup: []SetupFile{piModels(string(RendererOpenAI), baseURLPlaceholder, "")}, customFor: []Renderer{RendererOpenAI, RendererRaw}},
 				{id: agentCodexID, label: "ChatGPT subscription (Codex)", host: "chatgpt.com", renderer: RendererOpenAI, suffix: "/backend-api", binary: agentPiID, setup: []SetupFile{piModels("openai-codex", baseURLPlaceholder, ""), {Path: "~/.pi/agent/settings.json", Language: jsonLanguage, Body: `{
   "transport": "sse"
