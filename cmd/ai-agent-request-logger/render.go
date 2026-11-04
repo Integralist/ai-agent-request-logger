@@ -9,9 +9,12 @@ import (
 	"html"
 	"io"
 	"maps"
+	"regexp"
 	"slices"
 	"strings"
 )
+
+var markdownFilePath = regexp.MustCompile(`(?:@~|~|/)[A-Za-z0-9._~/-]+\.md`)
 
 var redactedHeaders = map[string]bool{
 	"authorization":  true,
@@ -28,7 +31,11 @@ func RenderMarkdown(capture Capture) string {
 		request = nil
 	}
 	model := requestModel(request, capture.Path)
-	parts := []string{renderMeta(capture, object(request), model, capture.ResponseBody)}
+	usage := responseTokenUsage(capture.Renderer, capture.ResponseBody)
+	parts := []string{renderMeta(capture, object(request), model, usage)}
+	if len(usage) > 0 {
+		parts = append(parts, details("Token usage details", fenceJSON(usage)))
+	}
 	if headers := renderHeaders(capture.RequestHeaders); headers != "" {
 		parts = append(parts, details(fmt.Sprintf("Request headers (%d)", len(capture.RequestHeaders)), headers))
 	}
@@ -76,7 +83,7 @@ func decodeRequestBody(body []byte, encoding string) (requestText string, warnin
 }
 
 // renderMeta gives each capture a useful title and a compact summary before the full request.
-func renderMeta(capture Capture, request map[string]any, model string, responseBody []byte) string {
+func renderMeta(capture Capture, request map[string]any, model string, usage map[string]any) string {
 	lines := []string{
 		fmt.Sprintf("# %s — `%s`", capture.AgentLabel, model),
 		"",
@@ -98,13 +105,35 @@ func renderMeta(capture Capture, request map[string]any, model string, responseB
 		}
 		lines = append(lines, fmt.Sprintf("- **Tools:** %d (%s)", len(toolNames), strings.Join(quoted, ", ")))
 	}
-	if usage := responseTokenUsage(capture.Renderer, responseBody); len(usage) > 0 {
-		lines = append(lines, "- **Token usage:** "+compactJSON(usage))
+	if summary := tokenUsageSummary(usage); summary != "" {
+		lines = append(lines, "- **Token usage:** "+summary)
 	}
 	return strings.Join(lines, "\n")
 }
 
 // responseTokenUsage combines token usage fields from JSON and streamed responses.
+func tokenUsageSummary(usage map[string]any) string {
+	fields := []struct {
+		label string
+		keys  []string
+	}{
+		{label: "input", keys: []string{"input_tokens", "prompt_tokens", "promptTokenCount"}},
+		{label: "output", keys: []string{"output_tokens", "completion_tokens", "candidatesTokenCount"}},
+		{label: "total", keys: []string{"total_tokens", "totalTokenCount"}},
+	}
+	var summary []string
+	for _, field := range fields {
+		for _, key := range field.keys {
+			if value, ok := usage[key]; ok {
+				summary = append(summary, fmt.Sprintf("%s: %v", field.label, value))
+				break
+			}
+		}
+	}
+	return strings.Join(summary, " · ")
+}
+
+// responseTokenUsage extracts structured token counters from JSON and streamed responses.
 func responseTokenUsage(renderer Renderer, body []byte) map[string]any {
 	usage := make(map[string]any)
 	mergeUsage := func(raw any) {
@@ -285,7 +314,7 @@ func renderAnthropicMessage(message any) string {
 // renderAnthropicContent formats content blocks while replacing embedded image bytes with a note.
 func renderAnthropicContent(content any) string {
 	if text, ok := content.(string); ok {
-		return text
+		return renderMarkdownText(text)
 	}
 	blocks, ok := content.([]any)
 	if !ok {
@@ -296,7 +325,7 @@ func renderAnthropicContent(content any) string {
 		block := object(raw)
 		switch stringValue(block["type"], "") {
 		case textContentType:
-			parts = append(parts, stringValue(block[textContentType], ""))
+			parts = append(parts, renderMarkdownText(stringValue(block[textContentType], "")))
 		case thinkingContentType:
 			parts = append(parts, details("Thinking", stringValue(block[thinkingContentType], "")))
 		case "tool_use":
@@ -320,6 +349,7 @@ func renderAnthropicContent(content any) string {
 func renderOpenAIRequest(request map[string]any) string {
 	parts := renderParams(request, []string{"max_tokens", "max_output_tokens", "temperature", "top_p", "stream", "stop", "tool_choice", "reasoning", "metadata"})
 	if instructions := stringValue(request["instructions"], ""); instructions != "" {
+		instructions = renderMarkdownText(instructions)
 		parts = append(parts, details(fmt.Sprintf("System prompt (%d characters)", len(instructions)), instructions))
 	}
 	if tools := array(request["tools"]); len(tools) > 0 {
@@ -363,7 +393,7 @@ func renderOpenAIChatMessage(raw any) string {
 	var parts []string
 	content := message["content"]
 	if text, ok := content.(string); ok {
-		parts = append(parts, text)
+		parts = append(parts, renderMarkdownText(text))
 	} else if blocks, ok := content.([]any); ok {
 		for _, block := range blocks {
 			item := object(block)
@@ -377,7 +407,7 @@ func renderOpenAIChatMessage(raw any) string {
 	for _, call := range array(message["tool_calls"]) {
 		toolCall := object(call)
 		function := object(toolCall["function"])
-		parts = append(parts, renderToolUse(stringValue(function["name"], ""), stringValue(toolCall["id"], ""), fence(stringValue(function["arguments"], "{}"), jsonLanguage)))
+		parts = append(parts, renderToolUse(stringValue(function["name"], ""), stringValue(toolCall["id"], ""), fenceJSONText(stringValue(function["arguments"], "{}"))))
 	}
 	if stringValue(message["role"], "") == "tool" {
 		parts = append(parts, "### Tool result for "+stringValue(message["tool_call_id"], "unknown")+"\n\n"+contentText(content))
@@ -390,7 +420,7 @@ func renderOpenAIResponseItem(raw any) string {
 	item := object(raw)
 	switch stringValue(item["type"], "message") {
 	case "function_call":
-		return renderToolUse(stringValue(item["name"], ""), stringValue(item["call_id"], stringValue(item["id"], "")), fence(stringValue(item["arguments"], "{}"), jsonLanguage))
+		return renderToolUse(stringValue(item["name"], ""), stringValue(item["call_id"], stringValue(item["id"], "")), fenceJSONText(stringValue(item["arguments"], "{}")))
 	case "function_call_output":
 		return "### Tool result for " + stringValue(item["call_id"], "unknown") + "\n\n" + contentText(item["output"])
 	default:
@@ -408,7 +438,7 @@ func renderGeminiRequest(raw any) string {
 	if system, ok := request["systemInstruction"]; ok {
 		var content string
 		if text, isText := system.(string); isText {
-			content = text
+			content = renderMarkdownText(text)
 		} else {
 			content = renderGeminiParts(object(system)["parts"])
 		}
@@ -459,16 +489,16 @@ func renderGeminiMessage(raw any) string {
 // renderGeminiParts formats Gemini text, thought, function, and image parts.
 func renderGeminiParts(raw any) string {
 	if text, ok := raw.(string); ok {
-		return text
+		return renderMarkdownText(text)
 	}
 	var parts []string
 	for _, value := range array(raw) {
 		part := object(value)
 		if text, ok := part[textContentType].(string); ok {
 			if thought, ok := part["thought"].(bool); ok && thought {
-				parts = append(parts, details("Thinking", text))
+				parts = append(parts, details("Thinking", renderMarkdownText(text)))
 			} else {
-				parts = append(parts, text)
+				parts = append(parts, renderMarkdownText(text))
 			}
 		} else if call, ok := part["functionCall"]; ok {
 			function := object(call)
@@ -533,7 +563,6 @@ func renderRawSSEEvents(events []any, raw string) string {
 func renderAnthropicEvents(events []any, raw string) string {
 	blocks := make(map[int]map[string]any)
 	var stopReason string
-	var usage any
 	for _, rawEvent := range events {
 		event := object(rawEvent)
 		switch stringValue(event["type"], "") {
@@ -556,22 +585,11 @@ func renderAnthropicEvents(events []any, raw string) string {
 		case "message_delta":
 			delta := object(event["delta"])
 			stopReason = stringValue(delta["stop_reason"], stopReason)
-			if event["usage"] != nil {
-				usage = event["usage"]
-			}
-		case "message_start":
-			message := object(event["message"])
-			if message["usage"] != nil {
-				usage = message["usage"]
-			}
 		}
 	}
 	var parts []string
 	if stopReason != "" {
 		parts = append(parts, "- **stop reason**: "+stopReason)
-	}
-	if usage != nil {
-		parts = append(parts, "- **usage**: "+compactJSON(usage))
 	}
 	keys := make([]int, 0, len(blocks))
 	for index := range blocks {
@@ -583,11 +601,11 @@ func renderAnthropicEvents(events []any, raw string) string {
 		text := stringValue(block[textContentType], "")
 		switch stringValue(block["type"], textContentType) {
 		case textContentType:
-			parts = append(parts, "### Assistant response\n\n"+text)
+			parts = append(parts, "### Assistant response\n\n"+renderMarkdownText(text))
 		case thinkingContentType:
-			parts = append(parts, details("Thinking", text))
+			parts = append(parts, details("Thinking", renderMarkdownText(text)))
 		case "tool_use":
-			parts = append(parts, renderToolUse(stringValue(block["name"], ""), stringValue(block["id"], ""), fence(text, jsonLanguage)))
+			parts = append(parts, renderToolUse(stringValue(block["name"], ""), stringValue(block["id"], ""), fenceJSONText(text)))
 		}
 	}
 	if len(parts) == 0 {
@@ -611,7 +629,6 @@ func renderOpenAIEvents(events []any, raw string) string {
 	var text strings.Builder
 	tools := make(map[int]map[string]string)
 	var finish string
-	var usage any
 	for _, value := range events {
 		event := object(value)
 		choices := array(event["choices"])
@@ -633,19 +650,13 @@ func renderOpenAIEvents(events []any, raw string) string {
 			tools[index]["id"] = stringValue(call["id"], tools[index]["id"])
 		}
 		finish = stringValue(choice["finish_reason"], finish)
-		if event["usage"] != nil {
-			usage = event["usage"]
-		}
 	}
 	var parts []string
 	if finish != "" {
 		parts = append(parts, "- **finish reason**: "+finish)
 	}
-	if usage != nil {
-		parts = append(parts, "- **usage**: "+compactJSON(usage))
-	}
 	if text.Len() > 0 {
-		parts = append(parts, "### Assistant response\n\n"+text.String())
+		parts = append(parts, "### Assistant response\n\n"+renderMarkdownText(text.String()))
 	}
 	keys := make([]int, 0, len(tools))
 	for index := range tools {
@@ -654,7 +665,7 @@ func renderOpenAIEvents(events []any, raw string) string {
 	slices.Sort(keys)
 	for _, index := range keys {
 		tool := tools[index]
-		parts = append(parts, renderToolUse(tool["name"], tool["id"], fence(defaultString(tool["arguments"], "{}"), jsonLanguage)))
+		parts = append(parts, renderToolUse(tool["name"], tool["id"], fenceJSONText(defaultString(tool["arguments"], "{}"))))
 	}
 	if len(parts) == 0 {
 		return fence(raw, "")
@@ -667,7 +678,6 @@ func renderOpenAIResponsesEvents(events []any, raw string) string {
 	var text strings.Builder
 	tools := make(map[string]map[string]string)
 	var status string
-	var usage any
 	for _, value := range events {
 		event := object(value)
 		key := stringValue(event["item_id"], "0")
@@ -691,21 +701,17 @@ func renderOpenAIResponsesEvents(events []any, raw string) string {
 		case "response.completed":
 			response := object(event["response"])
 			status = stringValue(response["status"], status)
-			usage = response["usage"]
 		}
 	}
 	var parts []string
 	if status != "" {
 		parts = append(parts, "- **status**: "+status)
 	}
-	if usage != nil {
-		parts = append(parts, "- **usage**: "+compactJSON(usage))
-	}
 	if text.Len() > 0 {
-		parts = append(parts, "### Assistant response\n\n"+text.String())
+		parts = append(parts, "### Assistant response\n\n"+renderMarkdownText(text.String()))
 	}
 	for key, tool := range tools {
-		parts = append(parts, renderToolUse(tool["name"], key, fence(defaultString(tool["arguments"], "{}"), jsonLanguage)))
+		parts = append(parts, renderToolUse(tool["name"], key, fenceJSONText(defaultString(tool["arguments"], "{}"))))
 	}
 	if len(parts) == 0 {
 		return fence(raw, "")
@@ -719,7 +725,6 @@ func renderGeminiEvents(events []any, raw string) string {
 	var thinking strings.Builder
 	var calls []string
 	var finish string
-	var usage any
 	for _, value := range events {
 		event := object(value)
 		if nested, ok := event["response"]; ok {
@@ -745,22 +750,16 @@ func renderGeminiEvents(events []any, raw string) string {
 			}
 			finish = stringValue(candidate["finishReason"], finish)
 		}
-		if event["usageMetadata"] != nil {
-			usage = event["usageMetadata"]
-		}
 	}
 	var parts []string
 	if finish != "" {
 		parts = append(parts, "- **finish reason**: "+finish)
 	}
-	if usage != nil {
-		parts = append(parts, "- **usage**: "+compactJSON(usage))
-	}
 	if thinking.Len() > 0 {
-		parts = append(parts, details("Thinking", thinking.String()))
+		parts = append(parts, details("Thinking", renderMarkdownText(thinking.String())))
 	}
 	if text.Len() > 0 {
-		parts = append(parts, "### Assistant response\n\n"+text.String())
+		parts = append(parts, "### Assistant response\n\n"+renderMarkdownText(text.String()))
 	}
 	parts = append(parts, calls...)
 	if len(parts) == 0 {
@@ -812,8 +811,16 @@ func renderMessageList(messages []any, renderContent func(any) string) string {
 func renderParams(values map[string]any, keys []string) []string {
 	var entries []string
 	for _, key := range keys {
-		if value, ok := values[key]; ok {
-			entries = append(entries, "- **"+key+"**: "+compactJSON(value))
+		value, ok := values[key]
+		if !ok {
+			continue
+		}
+		switch value.(type) {
+		case map[string]any, []any:
+			block := strings.ReplaceAll(fenceJSON(value), "\n", "\n  ")
+			entries = append(entries, "- **"+key+"**:\n\n  "+block)
+		default:
+			entries = append(entries, "- **"+key+"**: `"+compactJSON(value)+"`")
 		}
 	}
 	if len(entries) == 0 {
@@ -844,14 +851,14 @@ func requestModel(request any, path string) string {
 // contentText keeps strings readable and formats structured values as JSON.
 func contentText(value any) string {
 	if text, ok := value.(string); ok {
-		return text
+		return renderMarkdownText(text)
 	}
 	if blocks, ok := value.([]any); ok {
 		var parts []string
 		for _, block := range blocks {
 			item := object(block)
 			if text, ok := item[textContentType].(string); ok {
-				parts = append(parts, text)
+				parts = append(parts, renderMarkdownText(text))
 			} else {
 				parts = append(parts, fenceJSON(block))
 			}
@@ -913,6 +920,15 @@ func compactJSON(value any) string {
 	return string(encoded)
 }
 
+// fenceJSONText parses and pretty-prints JSON text when possible.
+func fenceJSONText(text string) string {
+	var value any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(text)), &value); err == nil {
+		return fenceJSON(value)
+	}
+	return fence(text, jsonLanguage)
+}
+
 // fenceJSON renders a value in a fenced JSON block.
 func fenceJSON(value any) string {
 	encoded, err := json.MarshalIndent(value, "", "  ")
@@ -929,7 +945,117 @@ func fence(text, language string) string {
 
 // details folds verbose content under a readable summary while preserving the original text.
 func details(summary, content string) string {
-	return "<details>\n<summary>" + html.EscapeString(summary) + "</summary>\n\n" + content + "\n\n</details>"
+	return detailsWithHTMLSummary(html.EscapeString(summary), content)
+}
+
+// detailsWithHTMLSummary wraps content when its summary already contains safe inline HTML.
+func detailsWithHTMLSummary(summary, content string) string {
+	return "<details>\n<summary>" + summary + "</summary>\n\n" + content + "\n\n</details>"
+}
+
+// renderMarkdownText preserves prose Markdown, formats standalone JSON, paths, and large AGENTS files.
+func renderMarkdownText(text string) string {
+	trimmed := strings.TrimSpace(text)
+	if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
+		var value any
+		if json.Unmarshal([]byte(trimmed), &value) == nil {
+			return fenceJSON(value)
+		}
+	}
+	return renderAgentMarkdown(text)
+}
+
+// renderAgentMarkdown collapses injected AGENTS.md content while leaving its Markdown rendered.
+func renderAgentMarkdown(text string) string {
+	lines := strings.Split(text, "\n")
+	var sections []string
+	var plain []string
+	flushPlain := func() {
+		if len(plain) == 0 {
+			return
+		}
+		sections = append(sections, formatMarkdownPaths(strings.Join(plain, "\n")))
+		plain = nil
+	}
+	for index := 0; index < len(lines); {
+		path, suffix, ok := agentsMarkdownHeader(lines[index])
+		if !ok {
+			plain = append(plain, lines[index])
+			index++
+			continue
+		}
+		flushPlain()
+		end := index + 1
+		for end < len(lines) {
+			line := strings.TrimSpace(lines[end])
+			if strings.HasPrefix(line, "Contents of ") && strings.Contains(line, ".md") {
+				break
+			}
+			end++
+		}
+		summary := "Contents of <code>" + html.EscapeString(path) + "</code>" + html.EscapeString(suffix)
+		content := strings.Trim(formatMarkdownPaths(strings.Join(lines[index+1:end], "\n")), "\n")
+		sections = append(sections, detailsWithHTMLSummary(summary, content))
+		index = end
+	}
+	flushPlain()
+	return strings.Join(nonEmpty(sections), "\n\n")
+}
+
+// agentsMarkdownHeader identifies a prompt section that embeds an AGENTS.md file.
+func agentsMarkdownHeader(line string) (path, suffix string, ok bool) {
+	content, found := strings.CutPrefix(strings.TrimSpace(line), "Contents of ")
+	if !found {
+		return "", "", false
+	}
+	end := strings.Index(content, ".md")
+	if end < 0 {
+		return "", "", false
+	}
+	path = content[:end+3]
+	if !strings.HasSuffix(path, "/AGENTS.md") && path != "AGENTS.md" {
+		return "", "", false
+	}
+	return path, content[end+3:], true
+}
+
+// formatMarkdownPaths marks Markdown file paths as inline code outside fenced code blocks.
+func formatMarkdownPaths(text string) string {
+	lines := strings.Split(text, "\n")
+	inFence := false
+	for index, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
+			inFence = !inFence
+			continue
+		}
+		if inFence {
+			continue
+		}
+		matches := markdownFilePath.FindAllStringIndex(line, -1)
+		if len(matches) == 0 {
+			continue
+		}
+		var formatted strings.Builder
+		last := 0
+		for _, match := range matches {
+			formatted.WriteString(line[last:match[0]])
+			path := line[match[0]:match[1]]
+			alreadyCode := match[0] > 0 && line[match[0]-1] == '`' || match[1] < len(line) && line[match[1]] == '`'
+			urlPath := match[0] > 0 && (line[match[0]-1] == ':' || line[match[0]-1] == '/')
+			if alreadyCode || urlPath {
+				formatted.WriteString(path)
+			} else {
+				formatted.WriteByte('`')
+				formatted.WriteString(path)
+				formatted.WriteByte('`')
+			}
+			last = match[1]
+		}
+		formatted.WriteString(line[last:])
+		lines[index] = formatted.String()
+	}
+	return strings.Join(lines, "\n")
 }
 
 // renderToolUse labels a tool call and folds its argument payload out of the conversation.

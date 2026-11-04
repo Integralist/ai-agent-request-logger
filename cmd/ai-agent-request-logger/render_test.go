@@ -51,7 +51,9 @@ func TestRenderMarkdownSummarizesAndFoldsLargeSectionsMakesCapturesScannable(t *
 	for _, expected := range []string{
 		"# Claude Code — `claude-haiku-5-5`", "## Summary", "- **Upstream status:** 200",
 		"- **Messages:** 1", "- **Tools:** 1 (`read_file`)",
-		"- **Token usage:** {\"input_tokens\":12,\"output_tokens\":4}",
+		"- **Token usage:** input: 12 · output: 4",
+		"<summary>Token usage details</summary>",
+		"```json\n{\n  \"input_tokens\": 12,\n  \"output_tokens\": 4\n}\n```",
 		"<summary>Request headers (1)</summary>", "## Request",
 		"<summary>System prompt (18 characters)</summary>",
 		"<summary>Tool definitions (1)</summary>", "### User message 1", "Explain this code",
@@ -63,6 +65,58 @@ func TestRenderMarkdownSummarizesAndFoldsLargeSectionsMakesCapturesScannable(t *
 	}
 	if strings.Contains(markdown, "<meta>") || strings.Contains(markdown, "<message index=") {
 		t.Errorf("Markdown still uses XML-like wrappers:\n%s", markdown)
+	}
+}
+
+// TestRenderMarkdownFencesCompositeParametersAndJSONTextKeepsJSONReadable.
+func TestRenderMarkdownFencesCompositeParametersAndJSONTextKeepsJSONReadable(t *testing.T) {
+	capture := Capture{
+		AgentLabel: "Claude Code", Renderer: RendererAnthropic, Timestamp: time.Now().UTC(),
+		Method: http.MethodPost, Path: anthropicMessagesPath, StatusCode: 200,
+		RequestBody: []byte(`{"model":"claude-haiku-5-5","max_tokens":128000,"stream":true,"thinking":{"display":"summarized","type":"adaptive"},"metadata":{"user_id":{"device_id":"device-1","session_id":"session-1"}},"messages":[{"role":"user","content":"Return JSON"}]}`),
+		ResponseBody: []byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n" +
+			"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"{\\\"ok\\\":true}\"}}\n" +
+			"event: message_stop\ndata: {\"type\":\"message_stop\"}\n"),
+	}
+
+	markdown := RenderMarkdown(capture)
+	for _, expected := range []string{
+		"- **max_tokens**: `128000`", "- **stream**: `true`",
+		"- **thinking**:\n\n  ```json\n  {\n    \"display\": \"summarized\",\n    \"type\": \"adaptive\"\n  }\n  ```",
+		"- **metadata**:\n\n  ```json\n  {\n    \"user_id\": {\n      \"device_id\": \"device-1\",\n      \"session_id\": \"session-1\"\n    }\n  }\n  ```",
+		"```json\n{\n  \"ok\": true\n}\n```",
+	} {
+		if !strings.Contains(markdown, expected) {
+			t.Errorf("Markdown does not contain structured JSON output %q:\n%s", expected, markdown)
+		}
+	}
+	if strings.Contains(markdown, `**thinking**: {"display"`) || strings.Contains(markdown, `**metadata**: {"user_id"`) {
+		t.Errorf("composite parameters were rendered as inline JSON:\n%s", markdown)
+	}
+}
+
+// TestRenderMarkdownCollapsesAGENTSContentAndFormatsItsPathsKeepsLongInstructionsReadable.
+func TestRenderMarkdownCollapsesAGENTSContentAndFormatsItsPathsKeepsLongInstructionsReadable(t *testing.T) {
+	capture := Capture{
+		AgentLabel: "Claude Code", Renderer: RendererAnthropic, Timestamp: time.Now().UTC(),
+		Method: http.MethodPost, Path: anthropicMessagesPath, StatusCode: 200,
+		RequestBody:  []byte(`{"model":"claude-haiku-5-5","messages":[{"role":"user","content":"Contents of /Users/mmcdonnell/.agents/AGENTS.md (user's private global instructions):\n\n# Communication & Tone\n\n## Chat Execution\n\n- Keep replies short.\n\nContents of /Users/mmcdonnell/.claude/CLAUDE.md:\n\n@~/.agents/AGENTS.md\nSee https://example.com/README.md"}]}`),
+		ResponseBody: []byte(`{"content":[{"type":"text","text":"Done."}]}`),
+	}
+
+	markdown := RenderMarkdown(capture)
+	for _, expected := range []string{
+		"<summary>Contents of <code>/Users/mmcdonnell/.agents/AGENTS.md</code> (user&#39;s private global instructions):</summary>",
+		"# Communication & Tone", "## Chat Execution", "- Keep replies short.",
+		"Contents of `/Users/mmcdonnell/.claude/CLAUDE.md`",
+		"`@~/.agents/AGENTS.md`", "https://example.com/README.md",
+	} {
+		if !strings.Contains(markdown, expected) {
+			t.Errorf("Markdown does not contain %q:\n%s", expected, markdown)
+		}
+	}
+	if strings.Contains(markdown, "```markdown") || !strings.Contains(markdown, "\n\n# Communication & Tone") {
+		t.Errorf("AGENTS.md content was escaped or rendered as a code block:\n%s", markdown)
 	}
 }
 
@@ -114,7 +168,7 @@ func TestRenderMarkdownFormatsOpenAIResponsesRequestsAndStreamsKeepsPromptsAndTo
 			"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":5}}}\n"),
 	}
 	markdown := RenderMarkdown(capture)
-	for _, expected := range []string{"gpt-local", "Use tools carefully", "### read_file", "read this", "### Tool call: read_file", "Answer", "write_file", "completed"} {
+	for _, expected := range []string{"gpt-local", "Use tools carefully", "### read_file", "read this", "### Tool call: read_file", "<summary>Arguments</summary>", "```json\n{\n  \"path\": \"a.go\"\n}\n```", "Answer", "write_file", "completed"} {
 		if !strings.Contains(markdown, expected) {
 			t.Errorf("OpenAI Markdown does not contain %q", expected)
 		}
