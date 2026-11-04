@@ -98,6 +98,11 @@ func TestResolveChoiceRejectsUnknownAndUnloggableHarnessesKeepsTheWizardHonest(t
 			t.Errorf("ResolveChoice(%q) error = nil, want an unsupported choice error", choice.Agent)
 		}
 	}
+
+	_, err := ResolveChoice(AgentChoice{Agent: otherChoiceID}, 8787)
+	if err == nil || err.Error() != "logger: setup not catalogued" {
+		t.Errorf("ResolveChoice(other) error = %v, want %q", err, "logger: setup not catalogued")
+	}
 }
 
 // TestResolveCustomChoiceRejectsEmbeddedCredentialsPreventsAccidentalSecretStorage.

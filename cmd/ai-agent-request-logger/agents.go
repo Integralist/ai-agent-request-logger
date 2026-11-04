@@ -15,8 +15,6 @@ const (
 	customProviderID = "custom"
 	// otherChoiceID selects an unlisted harness or provider.
 	otherChoiceID = "other"
-	// issueURL directs users to request support for an unlisted harness.
-	issueURL = "https://github.com/ai-hero-dev/ai-coding-crash-course/issues/new"
 )
 
 // AgentSummary describes a harness option shown by the setup wizard.
@@ -272,7 +270,7 @@ func ResolveChoice(choice AgentChoice, port int) (Target, error) {
 	}
 	agent, ok := findAgent(choice.Agent)
 	if choice.Agent == otherChoiceID || choice.Provider == otherChoiceID {
-		return Target{}, fmt.Errorf("logger: setup not catalogued; request support at %s", issueURL)
+		return Target{}, errors.New("logger: setup not catalogued")
 	}
 	if !ok {
 		return Target{}, fmt.Errorf("logger: unknown agent %q", choice.Agent)
