@@ -1,197 +1,199 @@
 # AI Agent Request Logger
 
-A small local proxy that records the requests a coding agent sends to its model
-provider. It saves the complete request and response, plus a readable Markdown
-view of the system prompt, tools, messages, and model output.
+A local proxy that saves each model request a coding agent sends, and the
+response that comes back. Each capture also gets an HTML page you can read in
+a browser.
 
-## Install
+## Quick start
 
-From the source directory, run:
+1. Install the logger:
 
-```bash
-go install ./cmd/ai-agent-request-logger
-```
+   ```bash
+   go install ./cmd/ai-agent-request-logger
+   ```
 
-Go installs the `ai-agent-request-logger` binary in `GOBIN`, or in
-`GOPATH/bin` when `GOBIN` is unset. Add that directory to `PATH`, then run the
-command from any project directory:
+   Go puts the `ai-agent-request-logger` binary in `GOBIN`, or in `GOPATH/bin`
+   when `GOBIN` is unset. Add that directory to your `PATH`.
 
-```bash
-ai-agent-request-logger
-```
+2. Start the logger from the project you want to capture:
 
-The first run asks which harness and provider you use. It prints the needed
-configuration and launch command, then waits for requests. Run the harness in
-a second terminal. The selected route is remembered under your operating
-system's user config directory. Use `--force` to choose again.
+   ```bash
+   ai-agent-request-logger
+   ```
 
-```bash
-ai-agent-request-logger --force
-ai-agent-request-logger --port 9000
-ai-agent-request-logger --log-dir /tmp/agent-captures
-```
+3. Answer the setup questions: your agent, then its provider. The logger
+   prints the configuration and the command that launches your agent, then
+   waits for requests.
+4. In a second terminal, run the printed command and send a prompt.
+5. Open the newest `.html` file in `.ai-agent-request-logger/logs/`, under the
+   directory where you started the logger.
 
-The default listener is `127.0.0.1:8787`. By default, captures go under
-`.ai-agent-request-logger/logs` in the directory where you start the logger.
-Add this to that project's `.gitignore` so captured prompts and code are not
+The logger remembers your choice under your operating system's user config
+directory. Run `ai-agent-request-logger --force` to choose again.
+
+Add the capture directory to the project's `.gitignore` so captures are never
 committed:
 
 ```gitignore
 .ai-agent-request-logger/
 ```
 
+## Choose your route
+
+| Agent | Provider options | Setup |
+| --- | --- | --- |
+| Claude Code | Anthropic, Google Vertex AI | [Claude Code](#claude-code) |
+| Pi | Anthropic, OpenAI API key, ChatGPT subscription (Codex), Custom base URL | [Pi](#pi) |
+| GitHub Copilot CLI | GitHub subscription | [GitHub Copilot CLI](#github-copilot-cli) |
+| Codex, OpenCode, OMP, Gemini CLI, Antigravity CLI, Junie | Shown by the wizard | [Other agents](#other-agents) |
+| Cursor CLI, Amp | Cannot be captured | [Limits](#limits) |
+
+## Set up each agent
+
+### Claude Code
+
+Use this route for a Claude Code subscription signed in with SSO.
+
+1. Sign in to Claude Code as usual.
+2. In the logger, choose **Claude Code**, then **Anthropic**. If Claude Code
+   uses Google Vertex AI, choose **Google Vertex AI** instead.
+3. In a second terminal, run the printed command. On macOS and Linux it looks
+   like this:
+
+   ```bash
+   ANTHROPIC_BASE_URL='http://localhost:8787' ENABLE_TOOL_SEARCH='true' claude
+   ```
+
+- `ANTHROPIC_BASE_URL` sends model traffic through the proxy. It is the only
+  gateway setting, so Claude Code keeps your saved `claude.ai` login, and your
+  usage limits and billing still apply.
+- The proxy passes the `authorization` and `anthropic-beta` headers through
+  unchanged.
+- `ENABLE_TOOL_SEARCH=true` keeps tool-search behaviour the same when the API
+  endpoint is overridden.
+
+> [!NOTE]
+> This route has not been tested against a specific company tenant. If your
+> organization requires a separate LLM gateway credential, a custom upstream,
+> or bans local proxies, ask your administrator first. This route may not work
+> for you.
+
+See Anthropic's [Claude Code gateway guidance][claude-gateway] and
+[request header reference][claude-headers].
+
+### Pi
+
+Pi has no base-URL option. The logger prints a snippet for
+`~/.pi/agent/models.json`. Merge it into your existing file rather than
+replacing it. The key is `baseUrl`.
+
+| Route in the wizard | Extra setup |
+| --- | --- |
+| Anthropic | None; Pi's sign-in supplies the credential |
+| OpenAI API key | Keep the key in Pi's auth setup |
+| ChatGPT subscription (Codex) | Set SSE transport, see below |
+| Custom base URL | Choose the wire format, then enter a model ID |
+
+The Codex route needs `"transport": "sse"` in `~/.pi/agent/settings.json`.
+The logger handles only HTTP, and Pi's default transport can choose WebSockets.
+
+For a custom server, model discovery checks the unauthenticated OpenAI-style
+`/v1/models` endpoint. If an Anthropic-compatible server does not provide
+that endpoint, enter its model ID manually. A custom `models` list replaces
+Pi's built-in list for that provider, so the snippet names the model you
+selected.
+
+GitHub Copilot is not available through Pi. See [Limits](#limits).
+
+See Pi's [model configuration][pi-models] and [transport settings][pi-settings]
+documentation.
+
+### GitHub Copilot CLI
+
+This route is for the terminal `copilot` command, not the VS Code Copilot
+extension.
+
+1. In the logger, choose **GitHub Copilot CLI**, then **GitHub subscription**.
+2. Run the printed command. It sets `COPILOT_API_URL` to the proxy.
+3. Choose a GPT model in Copilot, for example `copilot --model gpt-5.4` or
+   `/model gpt-5.4`.
+
+> [!NOTE]
+> `COPILOT_API_URL` is not in the public Copilot CLI configuration docs.
+> Confirm that requests appear in the logs before you rely on this route. Some
+> model and transport combinations use WebSockets, which the logger cannot
+> capture.
+
+See the [Copilot CLI configuration][copilot-config] and the
+[model-selection reference][copilot-cli].
+
+### Other agents
+
+The wizard also offers Codex, OpenCode, OMP, Gemini CLI, Antigravity CLI, and
+Junie. Pick the agent in the wizard and follow the printed setup. **Custom
+base URL** works with compatible third-party and local model servers.
+
+## Captures
+
+By default, captures go under `.ai-agent-request-logger/logs` in the directory
+where you start the logger. Each capture has three files:
+
+- `.html`: a styled, self-contained view of the request, headers, and response,
+  including linked tool definitions. It has a System, Light, and Dark
+  appearance control and local font fallbacks, and it loads no external assets.
+  Messages are numbered, sit in one box, and start closed. Long responses start
+  folded.
+- `.request.txt`: the exact request body bytes, including any compression.
+- `.response.txt`: the exact response body bytes.
+
+The HTML view masks common credential headers.
+
+> [!WARNING]
+> Captures can include source code, prompts, tool definitions, and model
+> output. Header masking does not remove secrets embedded in request or
+> response bodies. Keep the capture directory private.
+
 ## How it works
 
 ```text
-Any supported harness
-  -> local HTTP proxy on 127.0.0.1
-  -> selected model provider over HTTPS
-  -> response streamed back to the harness
+Your agent
+  -> local proxy on 127.0.0.1
+  -> your model provider over HTTPS
+  -> the response streams back to your agent
 ```
 
-The proxy uses the selected harness/provider pair to choose one upstream API
-endpoint and a renderer for its format. It preserves authentication and other
-end-to-end headers, forwards the request, and streams the provider's response
-back. It records model-generation requests after the response completes;
-token-counting and other housekeeping calls are forwarded but not saved.
+The route you choose decides which provider API the proxy calls and how the
+capture is formatted. The proxy keeps your authentication and other
+end-to-end headers, forwards the request, and streams the response back. It
+saves model-generation requests once the response completes. Housekeeping
+calls, such as token counting, are forwarded but not saved.
 
-Each capture has three files:
+## Command options
 
-- `.md`: readable request, headers, and response. Common credential headers are
-  masked.
-- `.request.txt`: exact request body bytes, including compression.
-- `.response.txt`: exact response body bytes.
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `--force` | Off | Forget the saved choice and run setup again. |
+| `--port` | `8787`, or `PORT` when set | Local port on `127.0.0.1`. |
+| `--log-dir` | `.ai-agent-request-logger/logs` | Where captures are written. |
 
-These files can include source code, prompts, tool definitions, and model
-output. Header masking does not remove secrets embedded in request or response
-bodies. Keep the capture directory private.
+## Limits
 
-## Pi
-
-Pi has no base-URL environment variable. The logger prints a snippet for
-`~/.pi/agent/models.json`; merge it into the file rather than replacing your
-existing provider settings. Pi's provider configuration uses the exact key
-`baseUrl`.
-
-### Anthropic
-
-Choose **Pi**, then **Anthropic**. The generated `anthropic` provider points
-Pi's existing Anthropic model list at the local proxy. Your Pi authentication
-continues to supply the request credential.
-
-```json
-{
-  "providers": {
-    "anthropic": {
-      "baseUrl": "http://localhost:8787"
-    }
-  }
-}
-```
-
-### OpenAI API key
-
-Choose **Pi**, then **OpenAI API key**. The generated `openai` provider uses
-`http://localhost:8787/v1`. Keep your API key in Pi's usual auth setup; do not
-put it in this file or in the README.
-
-### GitHub Copilot models
-
-Pi's GitHub Copilot OAuth provider derives its upstream URL from the Copilot
-token. Pi uses that OAuth-provided URL for requests, overriding the
-`providers.github-copilot.baseUrl` setting in `~/.pi/agent/models.json`. A local
-proxy URL in that setting therefore does not route Pi's Copilot requests through
-the logger. The logger does not offer this Pi provider. This limitation is
-specific to Pi; the separate GitHub Copilot CLI route below is unchanged.
-
-### ChatGPT subscription (Codex)
-
-Choose **Pi**, then **ChatGPT subscription (Codex)**. The generated provider
-uses `http://localhost:8787/backend-api`. Pi appends its Codex endpoint to that
-prefix. This route also needs the following setting in
-`~/.pi/agent/settings.json`:
-
-```json
-{
-  "transport": "sse"
-}
-```
-
-The proxy handles HTTP, not WebSockets. Pi's automatic transport can choose a
-WebSocket for this route, so the logger explicitly switches it to SSE. Pi also
-sends this route's request body compressed with zstd. The raw `.request.txt`
-file preserves those bytes exactly, but this standard-library build cannot
-zstd-decompress them for the readable Markdown view; that view displays a
-warning instead.
-
-For a custom Pi model server, choose **Custom base URL**, select its wire
-format, and enter a model ID when prompted. Model discovery checks the
-unauthenticated OpenAI-style `/v1/models` endpoint. If an Anthropic-compatible
-server does not provide that endpoint, enter its model ID manually.
-
-Pi's [model configuration](https://pi.dev/docs/latest/models) and
-[transport settings](https://pi.dev/docs/latest/settings) documentation
-covers these fields. Adding a custom `models` list replaces the selected
-provider's built-in model list, so the generated custom-target snippet names
-the model you selected.
-
-## Claude Code with Enterprise SSO
-
-Complete your normal Claude Code SSO sign-in first. In the logger, choose
-**Claude Code**, then **Anthropic**. In another terminal, run the command it
-prints; on macOS and Linux it looks like this:
-
-```bash
-ANTHROPIC_BASE_URL='http://localhost:8787' ENABLE_TOOL_SEARCH='true' claude
-```
-
-`ANTHROPIC_BASE_URL` sends model API traffic through the local proxy. When it
-is the only gateway setting, Claude Code keeps the saved `claude.ai` login as
-the credential, so your subscription's usage limits and billing still apply.
-The proxy passes the authorization and `anthropic-beta` headers through rather
-than replacing them. `ENABLE_TOOL_SEARCH=true` avoids changing Claude Code's
-tool-search behavior solely because the API endpoint is overridden.
-
-This route is intended for a Claude Code subscription authenticated through
-SSO, including an Enterprise account. It has not been tested against a
-specific company tenant. If your organization requires a separate LLM gateway
-credential, a custom upstream, or prohibits local proxies, check that setup
-with your administrator; it may not use the subscription-login route described
-above. If Claude Code is configured for Vertex AI, choose **Google Vertex AI**
-instead of **Anthropic**.
-
-See Anthropic's [Claude Code gateway guidance][claude-gateway] and [request
-header reference][claude-headers].
-
-## GitHub Copilot CLI with GPT models
-
-This route is for the terminal `copilot` command, not the VS Code Copilot
-extension. Choose **GitHub Copilot CLI**, then **GitHub subscription**. Start
-the command the logger prints; it sets `COPILOT_API_URL` to the local proxy.
-Choose a GPT model in Copilot with `copilot --model gpt-5.4` or `/model gpt-5.4`.
-
-There is a compatibility caveat: the current public Copilot CLI configuration
-docs do not list `COPILOT_API_URL`. The logger's route depends on that setting,
-so confirm that requests appear in the logs before relying on this setup. Some
-Copilot model/transport combinations use WebSockets, which this HTTP-only proxy
-cannot capture.
-
-See the [Copilot CLI configuration][copilot-config] and
-[CLI model-selection reference][copilot-cli].
-
-## Other supported harnesses
-
-The setup wizard also includes Codex, OpenCode, OMP, Gemini CLI, Antigravity
-CLI, and Junie. **Custom base URL** supports compatible third-party and local
-model servers. Cursor CLI and Amp cannot be logged because their system prompts
-and tool definitions are built on their servers, not sent in requests from your
-machine.
-
-The proxy is HTTP-only. If a harness or model negotiates a WebSocket, that
-request cannot be captured. The logger responds with `426 Upgrade Required` so
-clients that support fallback can retry over HTTP.
+- **HTTP only.** The proxy cannot capture WebSockets. It replies
+  `426 Upgrade Required`, so clients that support fallback retry over HTTP.
+- **GitHub Copilot is not offered through Pi.** Pi's GitHub Copilot sign-in
+  sends requests to its own Copilot API URL. Setting `baseUrl` in
+  `~/.pi/agent/models.json` does not route those requests through the logger,
+  so the logger does not offer that route. Use the
+  [GitHub Copilot CLI](#github-copilot-cli) route instead.
+- **Pi compresses the Codex route with zstd.** The `.request.txt` file keeps
+  the exact bytes. This standard-library build cannot decompress zstd, so the
+  HTML view shows a warning instead of the request.
+- **Cursor CLI and Amp cannot be captured.** Their system prompts and tool
+  definitions are built on their servers, not sent from your machine.
 
 [claude-gateway]: https://code.claude.com/docs/en/llm-gateway#subscriptions-and-gateways
 [claude-headers]: https://code.claude.com/docs/en/llm-gateway-protocol.md#request-headers
 [copilot-cli]: https://github.com/github/copilot-cli/blob/e1928292498bd60d8b8730381ed3818e82453711/_autodocs/api-reference/cli-interface.md
 [copilot-config]: https://github.com/github/copilot-cli/blob/e1928292498bd60d8b8730381ed3818e82453711/_autodocs/configuration.md
+[pi-models]: https://pi.dev/docs/latest/models
+[pi-settings]: https://pi.dev/docs/latest/settings
