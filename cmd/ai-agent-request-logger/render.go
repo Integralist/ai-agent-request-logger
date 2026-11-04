@@ -6,15 +6,11 @@ import (
 	"compress/zlib"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
+	"maps"
 	"slices"
-	"strconv"
 	"strings"
-)
-
-const (
-	// headerSectionFixedLineCount reserves tags and fences around rendered headers.
-	headerSectionFixedLineCount = 6
 )
 
 var redactedHeaders = map[string]bool{
@@ -24,7 +20,7 @@ var redactedHeaders = map[string]bool{
 	"x-goog-api-key": true,
 }
 
-// RenderMarkdown creates a readable, complete record of one captured exchange.
+// RenderMarkdown creates a scannable summary with the complete exchange available in structured sections.
 func RenderMarkdown(capture Capture) string {
 	requestText, decodeWarning := decodeRequestBody(capture.RequestBody, capture.RequestEncoding)
 	var request any
@@ -32,13 +28,15 @@ func RenderMarkdown(capture Capture) string {
 		request = nil
 	}
 	model := requestModel(request, capture.Path)
-	parts := []string{
-		renderMeta(capture, model),
-		renderHeaders(capture.RequestHeaders),
-		"<request>\n\n" + renderRequest(capture.Renderer, request, requestText, decodeWarning) + "\n\n</request>",
-		"<response>\n\n" + renderResponse(capture.Renderer, capture.ResponseBody) + "\n\n</response>",
+	parts := []string{renderMeta(capture, object(request), model, capture.ResponseBody)}
+	if headers := renderHeaders(capture.RequestHeaders); headers != "" {
+		parts = append(parts, details(fmt.Sprintf("Request headers (%d)", len(capture.RequestHeaders)), headers))
 	}
-	return strings.Join(parts, "\n\n") + "\n"
+	parts = append(parts,
+		"## Request\n\n"+renderRequest(capture.Renderer, request, requestText, decodeWarning),
+		"## Response\n\n"+renderResponse(capture.Renderer, capture.ResponseBody),
+	)
+	return strings.Join(nonEmpty(parts), "\n\n") + "\n"
 }
 
 // decodeRequestBody decodes common content encodings without changing saved request bytes.
@@ -77,20 +75,141 @@ func decodeRequestBody(body []byte, encoding string) (requestText string, warnin
 	}
 }
 
-// renderMeta writes stable request details before the captured content.
-func renderMeta(capture Capture, model string) string {
-	return fmt.Sprintf("<meta>\n\n- **timestamp**: %s\n- **agent**: %s\n- **wire format**: %s\n- **model**: %s\n- **endpoint**: %s %s\n- **upstream status**: %d\n\n</meta>", capture.Timestamp.Format("2006-01-02T15:04:05.000Z"), capture.AgentLabel, capture.Renderer, model, capture.Method, capture.Path, capture.StatusCode)
+// renderMeta gives each capture a useful title and a compact summary before the full request.
+func renderMeta(capture Capture, request map[string]any, model string, responseBody []byte) string {
+	lines := []string{
+		fmt.Sprintf("# %s — `%s`", capture.AgentLabel, model),
+		"",
+		"## Summary",
+		"",
+		"- **Captured:** " + capture.Timestamp.UTC().Format("2006-01-02 15:04:05.000 UTC"),
+		"- **Wire format:** " + string(capture.Renderer),
+		fmt.Sprintf("- **Endpoint:** `%s %s`", capture.Method, capture.Path),
+		fmt.Sprintf("- **Upstream status:** %d", capture.StatusCode),
+	}
+	messageCount, hasMessages, toolNames := requestSummary(capture.Renderer, request)
+	if hasMessages {
+		lines = append(lines, fmt.Sprintf("- **Messages:** %d", messageCount))
+	}
+	if len(toolNames) > 0 {
+		quoted := make([]string, len(toolNames))
+		for index, name := range toolNames {
+			quoted[index] = "`" + name + "`"
+		}
+		lines = append(lines, fmt.Sprintf("- **Tools:** %d (%s)", len(toolNames), strings.Join(quoted, ", ")))
+	}
+	if usage := responseTokenUsage(capture.Renderer, responseBody); len(usage) > 0 {
+		lines = append(lines, "- **Token usage:** "+compactJSON(usage))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// responseTokenUsage combines token usage fields from JSON and streamed responses.
+func responseTokenUsage(renderer Renderer, body []byte) map[string]any {
+	usage := make(map[string]any)
+	mergeUsage := func(raw any) {
+		maps.Copy(usage, object(raw))
+	}
+	if looksLikeSSE(string(body)) {
+		for _, raw := range sseEvents(string(body)) {
+			event := object(raw)
+			switch eventType := stringValue(event["type"], ""); renderer {
+			case RendererAnthropic:
+				switch eventType {
+				case "message_start":
+					mergeUsage(object(event["message"])["usage"])
+				case "message_delta":
+					mergeUsage(event["usage"])
+				}
+			case RendererOpenAI:
+				mergeUsage(event["usage"])
+				if event["type"] == "response.completed" {
+					mergeUsage(object(event["response"])["usage"])
+				}
+			case RendererGemini:
+				if response, ok := event["response"]; ok {
+					event = object(response)
+				}
+				mergeUsage(event["usageMetadata"])
+			}
+		}
+		return usage
+	}
+	var response any
+	if err := json.Unmarshal(body, &response); err != nil {
+		return usage
+	}
+	responseMap := object(response)
+	switch renderer {
+	case RendererAnthropic, RendererOpenAI:
+		mergeUsage(responseMap["usage"])
+		mergeUsage(object(responseMap["response"])["usage"])
+	case RendererGemini:
+		mergeUsage(responseMap["usageMetadata"])
+		mergeUsage(object(responseMap["response"])["usageMetadata"])
+	}
+	return usage
+}
+
+// requestSummary reads message counts and declared tool names for the capture overview.
+func requestSummary(renderer Renderer, request map[string]any) (int, bool, []string) {
+	messages := array(request["messages"])
+	tools := array(request["tools"])
+	hasMessages := len(messages) > 0
+	switch renderer {
+	case RendererAnthropic:
+		_, hasMessages = request["messages"]
+	case RendererOpenAI:
+		if len(messages) == 0 {
+			if input, ok := request["input"].(string); ok {
+				messages = []any{input}
+			} else {
+				for _, item := range array(request["input"]) {
+					if stringValue(object(item)["type"], "message") == "message" {
+						messages = append(messages, item)
+					}
+				}
+			}
+		}
+		_, hasInput := request["input"]
+		hasMessages = hasMessages || hasInput
+	case RendererGemini:
+		if nested, ok := request["request"]; ok {
+			request = object(nested)
+		}
+		messages = array(request["contents"])
+		tools = array(request["tools"])
+		_, hasMessages = request["contents"]
+	}
+	toolNames := make([]string, 0, len(tools))
+	for _, raw := range tools {
+		tool := object(raw)
+		if renderer == RendererGemini {
+			for _, declaration := range array(tool["functionDeclarations"]) {
+				toolNames = append(toolNames, stringValue(object(declaration)["name"], "(unnamed)"))
+			}
+			continue
+		}
+		function := object(tool["function"])
+		if len(function) == 0 {
+			function = tool
+		}
+		toolNames = append(toolNames, stringValue(function["name"], "(unnamed)"))
+	}
+	return len(messages), hasMessages, toolNames
 }
 
 // renderHeaders writes request headers while masking common credential fields.
 func renderHeaders(headers map[string][]string) string {
+	if len(headers) == 0 {
+		return ""
+	}
 	keys := make([]string, 0, len(headers))
 	for key := range headers {
 		keys = append(keys, key)
 	}
 	slices.Sort(keys)
-	lines := make([]string, 0, len(keys)+headerSectionFixedLineCount)
-	lines = append(lines, "<headers>", "", "```")
+	lines := []string{"```text"}
 	for _, key := range keys {
 		value := strings.Join(headers[key], ", ")
 		if redactedHeaders[strings.ToLower(key)] {
@@ -98,7 +217,7 @@ func renderHeaders(headers map[string][]string) string {
 		}
 		lines = append(lines, key+": "+value)
 	}
-	lines = append(lines, "```", "", "</headers>")
+	lines = append(lines, "```")
 	return strings.Join(lines, "\n")
 }
 
@@ -129,7 +248,8 @@ func renderRequest(renderer Renderer, request any, requestText, decodeWarning st
 func renderAnthropicRequest(request map[string]any) string {
 	parts := renderParams(request, []string{"max_tokens", "temperature", "top_p", "top_k", "stream", "stop_sequences", "tool_choice", thinkingContentType, "metadata"})
 	if system, ok := request["system"]; ok {
-		parts = append(parts, tag("system-prompt", renderAnthropicContent(system)))
+		content := renderAnthropicContent(system)
+		parts = append(parts, details(fmt.Sprintf("System prompt (%d characters)", len(content)), content))
 	}
 	if tools := array(request["tools"]); len(tools) > 0 {
 		parts = append(parts, renderAnthropicTools(tools))
@@ -153,7 +273,7 @@ func renderAnthropicTools(tools []any) string {
 		}
 		rendered = append(rendered, strings.Join(lines, "\n"))
 	}
-	return tag("tools", strings.Join(rendered, "\n\n"))
+	return details(fmt.Sprintf("Tool definitions (%d)", len(rendered)), strings.Join(rendered, "\n\n"))
 }
 
 // renderAnthropicMessage renders a message's text, tool use, tool results, and images.
@@ -178,11 +298,15 @@ func renderAnthropicContent(content any) string {
 		case textContentType:
 			parts = append(parts, stringValue(block[textContentType], ""))
 		case thinkingContentType:
-			parts = append(parts, tag(thinkingContentType, stringValue(block[thinkingContentType], "")))
+			parts = append(parts, details("Thinking", stringValue(block[thinkingContentType], "")))
 		case "tool_use":
-			parts = append(parts, fmt.Sprintf("<tool-use name=%q id=%q>\n\n%s\n\n</tool-use>", stringValue(block["name"], ""), stringValue(block["id"], ""), fenceJSON(block["input"])))
+			parts = append(parts, renderToolUse(stringValue(block["name"], ""), stringValue(block["id"], ""), fenceJSON(block["input"])))
 		case "tool_result":
-			parts = append(parts, fmt.Sprintf("<tool-result tool-use-id=%q is-error=%q>\n\n%s\n\n</tool-result>", stringValue(block["tool_use_id"], ""), fmt.Sprint(block["is_error"]), renderAnthropicContent(block["content"])))
+			label := "Tool result"
+			if id := stringValue(block["tool_use_id"], ""); id != "" {
+				label += " for " + id
+			}
+			parts = append(parts, "### "+label+"\n\n"+renderAnthropicContent(block["content"]))
 		case "image":
 			parts = append(parts, imageNote(object(block["source"])))
 		default:
@@ -196,7 +320,7 @@ func renderAnthropicContent(content any) string {
 func renderOpenAIRequest(request map[string]any) string {
 	parts := renderParams(request, []string{"max_tokens", "max_output_tokens", "temperature", "top_p", "stream", "stop", "tool_choice", "reasoning", "metadata"})
 	if instructions := stringValue(request["instructions"], ""); instructions != "" {
-		parts = append(parts, tag("system-prompt", instructions))
+		parts = append(parts, details(fmt.Sprintf("System prompt (%d characters)", len(instructions)), instructions))
 	}
 	if tools := array(request["tools"]); len(tools) > 0 {
 		parts = append(parts, renderOpenAITools(tools))
@@ -230,7 +354,7 @@ func renderOpenAITools(tools []any) string {
 		}
 		rendered = append(rendered, strings.Join(lines, "\n"))
 	}
-	return tag("tools", strings.Join(rendered, "\n\n"))
+	return details(fmt.Sprintf("Tool definitions (%d)", len(rendered)), strings.Join(rendered, "\n\n"))
 }
 
 // renderOpenAIChatMessage formats Chat Completions message content and tool calls.
@@ -253,10 +377,10 @@ func renderOpenAIChatMessage(raw any) string {
 	for _, call := range array(message["tool_calls"]) {
 		toolCall := object(call)
 		function := object(toolCall["function"])
-		parts = append(parts, fmt.Sprintf("<tool-use name=%q id=%q>\n\n%s\n\n</tool-use>", stringValue(function["name"], ""), stringValue(toolCall["id"], ""), fence(stringValue(function["arguments"], "{}"), jsonLanguage)))
+		parts = append(parts, renderToolUse(stringValue(function["name"], ""), stringValue(toolCall["id"], ""), fence(stringValue(function["arguments"], "{}"), jsonLanguage)))
 	}
 	if stringValue(message["role"], "") == "tool" {
-		parts = append(parts, fmt.Sprintf("<tool-result tool-call-id=%q>\n\n%s\n\n</tool-result>", stringValue(message["tool_call_id"], ""), contentText(content)))
+		parts = append(parts, "### Tool result for "+stringValue(message["tool_call_id"], "unknown")+"\n\n"+contentText(content))
 	}
 	return strings.Join(nonEmpty(parts), "\n\n")
 }
@@ -266,9 +390,9 @@ func renderOpenAIResponseItem(raw any) string {
 	item := object(raw)
 	switch stringValue(item["type"], "message") {
 	case "function_call":
-		return fmt.Sprintf("<tool-use name=%q id=%q>\n\n%s\n\n</tool-use>", stringValue(item["name"], ""), stringValue(item["call_id"], stringValue(item["id"], "")), fence(stringValue(item["arguments"], "{}"), jsonLanguage))
+		return renderToolUse(stringValue(item["name"], ""), stringValue(item["call_id"], stringValue(item["id"], "")), fence(stringValue(item["arguments"], "{}"), jsonLanguage))
 	case "function_call_output":
-		return fmt.Sprintf("<tool-result call-id=%q>\n\n%s\n\n</tool-result>", stringValue(item["call_id"], ""), contentText(item["output"]))
+		return "### Tool result for " + stringValue(item["call_id"], "unknown") + "\n\n" + contentText(item["output"])
 	default:
 		return contentText(item["content"])
 	}
@@ -282,11 +406,13 @@ func renderGeminiRequest(raw any) string {
 	}
 	parts := renderParams(object(request["generationConfig"]), []string{"temperature", "topP", "topK", "maxOutputTokens", "candidateCount", "stopSequences", "responseMimeType", "thinkingConfig"})
 	if system, ok := request["systemInstruction"]; ok {
+		var content string
 		if text, isText := system.(string); isText {
-			parts = append(parts, tag("system-prompt", text))
+			content = text
 		} else {
-			parts = append(parts, tag("system-prompt", renderGeminiParts(object(system)["parts"])))
+			content = renderGeminiParts(object(system)["parts"])
 		}
+		parts = append(parts, details(fmt.Sprintf("System prompt (%d characters)", len(content)), content))
 	}
 	if tools := array(request["tools"]); len(tools) > 0 {
 		parts = append(parts, renderGeminiTools(tools))
@@ -322,7 +448,7 @@ func renderGeminiTools(tools []any) string {
 			}
 		}
 	}
-	return tag("tools", strings.Join(rendered, "\n\n"))
+	return details(fmt.Sprintf("Tool definitions (%d)", len(rendered)), strings.Join(rendered, "\n\n"))
 }
 
 // renderGeminiMessage formats one Gemini content item.
@@ -340,16 +466,20 @@ func renderGeminiParts(raw any) string {
 		part := object(value)
 		if text, ok := part[textContentType].(string); ok {
 			if thought, ok := part["thought"].(bool); ok && thought {
-				parts = append(parts, tag(thinkingContentType, text))
+				parts = append(parts, details("Thinking", text))
 			} else {
 				parts = append(parts, text)
 			}
 		} else if call, ok := part["functionCall"]; ok {
 			function := object(call)
-			parts = append(parts, fmt.Sprintf("<tool-use name=%q id=%q>\n\n%s\n\n</tool-use>", stringValue(function["name"], ""), stringValue(function["id"], ""), fenceJSON(function["args"])))
+			parts = append(parts, renderToolUse(stringValue(function["name"], ""), stringValue(function["id"], ""), fenceJSON(function["args"])))
 		} else if result, ok := part["functionResponse"]; ok {
 			function := object(result)
-			parts = append(parts, fmt.Sprintf("<tool-result name=%q id=%q>\n\n%s\n\n</tool-result>", stringValue(function["name"], ""), stringValue(function["id"], ""), contentText(function["response"])))
+			label := "Tool result"
+			if name := stringValue(function["name"], ""); name != "" {
+				label += ": " + name
+			}
+			parts = append(parts, "### "+label+"\n\n"+contentText(function["response"]))
 		} else if data, ok := part["inlineData"]; ok {
 			parts = append(parts, imageNote(object(data)))
 		} else {
@@ -453,11 +583,11 @@ func renderAnthropicEvents(events []any, raw string) string {
 		text := stringValue(block[textContentType], "")
 		switch stringValue(block["type"], textContentType) {
 		case textContentType:
-			parts = append(parts, tag("assistant-text", text))
+			parts = append(parts, "### Assistant response\n\n"+text)
 		case thinkingContentType:
-			parts = append(parts, tag(thinkingContentType, text))
+			parts = append(parts, details("Thinking", text))
 		case "tool_use":
-			parts = append(parts, fmt.Sprintf("<tool-use name=%q id=%q>\n\n%s\n\n</tool-use>", stringValue(block["name"], ""), stringValue(block["id"], ""), fence(text, jsonLanguage)))
+			parts = append(parts, renderToolUse(stringValue(block["name"], ""), stringValue(block["id"], ""), fence(text, jsonLanguage)))
 		}
 	}
 	if len(parts) == 0 {
@@ -515,7 +645,7 @@ func renderOpenAIEvents(events []any, raw string) string {
 		parts = append(parts, "- **usage**: "+compactJSON(usage))
 	}
 	if text.Len() > 0 {
-		parts = append(parts, tag("assistant-text", text.String()))
+		parts = append(parts, "### Assistant response\n\n"+text.String())
 	}
 	keys := make([]int, 0, len(tools))
 	for index := range tools {
@@ -524,7 +654,7 @@ func renderOpenAIEvents(events []any, raw string) string {
 	slices.Sort(keys)
 	for _, index := range keys {
 		tool := tools[index]
-		parts = append(parts, fmt.Sprintf("<tool-use name=%q id=%q>\n\n%s\n\n</tool-use>", tool["name"], tool["id"], fence(defaultString(tool["arguments"], "{}"), jsonLanguage)))
+		parts = append(parts, renderToolUse(tool["name"], tool["id"], fence(defaultString(tool["arguments"], "{}"), jsonLanguage)))
 	}
 	if len(parts) == 0 {
 		return fence(raw, "")
@@ -572,10 +702,10 @@ func renderOpenAIResponsesEvents(events []any, raw string) string {
 		parts = append(parts, "- **usage**: "+compactJSON(usage))
 	}
 	if text.Len() > 0 {
-		parts = append(parts, tag("assistant-text", text.String()))
+		parts = append(parts, "### Assistant response\n\n"+text.String())
 	}
 	for key, tool := range tools {
-		parts = append(parts, fmt.Sprintf("<tool-use name=%q id=%q>\n\n%s\n\n</tool-use>", tool["name"], key, fence(defaultString(tool["arguments"], "{}"), jsonLanguage)))
+		parts = append(parts, renderToolUse(tool["name"], key, fence(defaultString(tool["arguments"], "{}"), jsonLanguage)))
 	}
 	if len(parts) == 0 {
 		return fence(raw, "")
@@ -610,7 +740,7 @@ func renderGeminiEvents(events []any, raw string) string {
 				}
 				if call, ok := part["functionCall"]; ok {
 					function := object(call)
-					calls = append(calls, fmt.Sprintf("<tool-use name=%q>\n\n%s\n\n</tool-use>", stringValue(function["name"], ""), fenceJSON(function["args"])))
+					calls = append(calls, renderToolUse(stringValue(function["name"], ""), "", fenceJSON(function["args"])))
 				}
 			}
 			finish = stringValue(candidate["finishReason"], finish)
@@ -627,10 +757,10 @@ func renderGeminiEvents(events []any, raw string) string {
 		parts = append(parts, "- **usage**: "+compactJSON(usage))
 	}
 	if thinking.Len() > 0 {
-		parts = append(parts, tag(thinkingContentType, thinking.String()))
+		parts = append(parts, details("Thinking", thinking.String()))
 	}
 	if text.Len() > 0 {
-		parts = append(parts, tag("assistant-text", text.String()))
+		parts = append(parts, "### Assistant response\n\n"+text.String())
 	}
 	parts = append(parts, calls...)
 	if len(parts) == 0 {
@@ -664,15 +794,18 @@ func looksLikeSSE(raw string) bool {
 	return strings.Contains(raw, "data:") || strings.Contains(raw, "event:")
 }
 
-// renderMessageList wraps content in role-labelled XML tags.
+// renderMessageList separates each conversation turn under a role-labelled heading.
 func renderMessageList(messages []any, renderContent func(any) string) string {
 	rendered := make([]string, 0, len(messages))
 	for index, raw := range messages {
 		message := object(raw)
 		role := stringValue(message["role"], stringValue(message["type"], "unknown"))
-		rendered = append(rendered, fmt.Sprintf("<message index=%q role=%q>\n\n%s\n\n</message>", strconv.Itoa(index+1), role, renderContent(raw)))
+		if role != "" {
+			role = strings.ToUpper(role[:1]) + role[1:]
+		}
+		rendered = append(rendered, fmt.Sprintf("### %s message %d\n\n%s", role, index+1, renderContent(raw)))
 	}
-	return tag("messages", strings.Join(rendered, "\n\n"))
+	return strings.Join(rendered, "\n\n")
 }
 
 // renderParams lists only parameters present in the request object.
@@ -686,7 +819,7 @@ func renderParams(values map[string]any, keys []string) []string {
 	if len(entries) == 0 {
 		return nil
 	}
-	return []string{tag("params", strings.Join(entries, "\n"))}
+	return []string{"### Parameters\n\n" + strings.Join(entries, "\n")}
 }
 
 // requestModel reads the model from a request body or a Gemini endpoint path.
@@ -794,12 +927,18 @@ func fence(text, language string) string {
 	return "```" + language + "\n" + text + "\n```"
 }
 
-// tag wraps content in an XML-like section tag to avoid Markdown heading collisions.
-func tag(name, content string) string {
-	if content == "" {
-		return "<" + name + "></" + name + ">"
+// details folds verbose content under a readable summary while preserving the original text.
+func details(summary, content string) string {
+	return "<details>\n<summary>" + html.EscapeString(summary) + "</summary>\n\n" + content + "\n\n</details>"
+}
+
+// renderToolUse labels a tool call and folds its argument payload out of the conversation.
+func renderToolUse(name, id, arguments string) string {
+	heading := "### Tool call: " + name
+	if id != "" {
+		heading += " (`" + id + "`)"
 	}
-	return "<" + name + ">\n\n" + content + "\n\n</" + name + ">"
+	return heading + "\n\n" + details("Arguments", arguments)
 }
 
 // jsonOrText returns parsed JSON when available, otherwise the original text.

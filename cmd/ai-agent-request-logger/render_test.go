@@ -19,7 +19,7 @@ func TestRenderMarkdownShowsAnthropicPromptAndMasksCredentialsProtectsUsefulCapt
 		ResponseBody:   []byte(`{"content":[{"type":"text","text":"I can explain it."}]}`),
 	}
 	markdown := RenderMarkdown(capture)
-	for _, expected := range []string{"claude-sonnet", "<system-prompt>", "Follow this policy", "### read_file", "Explain this code", "I can explain it.", "[REDACTED]"} {
+	for _, expected := range []string{"claude-sonnet", "<summary>System prompt (18 characters)</summary>", "Follow this policy", "### read_file", "Explain this code", "I can explain it.", "[REDACTED]"} {
 		if !strings.Contains(markdown, expected) {
 			t.Errorf("Markdown does not contain %q", expected)
 		}
@@ -29,6 +29,40 @@ func TestRenderMarkdownShowsAnthropicPromptAndMasksCredentialsProtectsUsefulCapt
 	}
 	if !strings.Contains(markdown, "oauth-capability") {
 		t.Error("Markdown omitted the anthropic-beta OAuth capability header")
+	}
+}
+
+// TestRenderMarkdownSummarizesAndFoldsLargeSectionsMakesCapturesScannable.
+func TestRenderMarkdownSummarizesAndFoldsLargeSectionsMakesCapturesScannable(t *testing.T) {
+	capture := Capture{
+		AgentLabel: "Claude Code", Renderer: RendererAnthropic,
+		Timestamp: time.Date(2026, 11, 3, 18, 59, 43, 0, time.UTC),
+		Method:    http.MethodPost, Path: anthropicMessagesPath, StatusCode: 200,
+		RequestHeaders: map[string][]string{"content-type": {"application/json"}},
+		RequestBody:    []byte(`{"model":"claude-haiku-5-5","system":"Follow this policy","tools":[{"name":"read_file","description":"Read a file","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"Explain this code"}]}`),
+		ResponseBody: []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":12}}}\n" +
+			"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n" +
+			"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Here is the answer.\"}}\n" +
+			"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":4}}\n" +
+			"event: message_stop\ndata: {\"type\":\"message_stop\"}\n"),
+	}
+
+	markdown := RenderMarkdown(capture)
+	for _, expected := range []string{
+		"# Claude Code — `claude-haiku-5-5`", "## Summary", "- **Upstream status:** 200",
+		"- **Messages:** 1", "- **Tools:** 1 (`read_file`)",
+		"- **Token usage:** {\"input_tokens\":12,\"output_tokens\":4}",
+		"<summary>Request headers (1)</summary>", "## Request",
+		"<summary>System prompt (18 characters)</summary>",
+		"<summary>Tool definitions (1)</summary>", "### User message 1", "Explain this code",
+		"## Response", "### Assistant response", "Here is the answer.",
+	} {
+		if !strings.Contains(markdown, expected) {
+			t.Errorf("Markdown does not contain %q", expected)
+		}
+	}
+	if strings.Contains(markdown, "<meta>") || strings.Contains(markdown, "<message index=") {
+		t.Errorf("Markdown still uses XML-like wrappers:\n%s", markdown)
 	}
 }
 
@@ -80,7 +114,7 @@ func TestRenderMarkdownFormatsOpenAIResponsesRequestsAndStreamsKeepsPromptsAndTo
 			"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":5}}}\n"),
 	}
 	markdown := RenderMarkdown(capture)
-	for _, expected := range []string{"gpt-local", "Use tools carefully", "### read_file", "read this", "<tool-use name=\"read_file\"", "Answer", "write_file", "completed"} {
+	for _, expected := range []string{"gpt-local", "Use tools carefully", "### read_file", "read this", "### Tool call: read_file", "Answer", "write_file", "completed"} {
 		if !strings.Contains(markdown, expected) {
 			t.Errorf("OpenAI Markdown does not contain %q", expected)
 		}
@@ -96,7 +130,7 @@ func TestRenderMarkdownFormatsGeminiRequestsAndStreamsKeepsItsDistinctWireShapeR
 		ResponseBody: []byte("data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"thinking\",\"thought\":true},{\"text\":\"answer\"},{\"functionCall\":{\"name\":\"search\",\"args\":{\"query\":\"docs\"}}}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":2}}\n"),
 	}
 	markdown := RenderMarkdown(capture)
-	for _, expected := range []string{"gemini-pro", "Follow policy", "### search", "find this", "<thinking>", "answer", "STOP", "promptTokenCount"} {
+	for _, expected := range []string{"gemini-pro", "Follow policy", "### search", "find this", "<summary>Thinking</summary>", "answer", "STOP", "promptTokenCount"} {
 		if !strings.Contains(markdown, expected) {
 			t.Errorf("Gemini Markdown does not contain %q", expected)
 		}

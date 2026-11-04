@@ -97,7 +97,7 @@ func TestProxyForwardsAuthAndCapturesModelRequestProtectsTheSSOHeaderAndCaptureC
 			}
 		}
 	}
-	for _, expected := range []string{"<system-prompt>", "follow policy", "### read", "hello", "[REDACTED]"} {
+	for _, expected := range []string{"<summary>System prompt (13 characters)</summary>", "follow policy", "### read", "hello", "[REDACTED]"} {
 		if !strings.Contains(markdown, expected) {
 			t.Errorf("Markdown capture does not contain %q", expected)
 		}
