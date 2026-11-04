@@ -1136,7 +1136,7 @@ func renderAgentMarkdown(text string, typed bool) string {
 		if isAdditionalContextHeader(lines[index]) {
 			flushPlain()
 			content := renderAgentMarkdown(strings.Join(lines[index+1:], "\n"), false)
-			sections = append(sections, foldable("Additional context", content))
+			sections = append(sections, details("Additional context", content))
 			break
 		}
 		path, suffix, ok := embeddedMarkdownHeader(lines[index])
@@ -1156,7 +1156,7 @@ func renderAgentMarkdown(text string, typed bool) string {
 		}
 		summary := "Contents of <code>" + stdhtml.EscapeString(path) + "</code>" + stdhtml.EscapeString(suffix)
 		content := strings.Trim(formatMarkdownPaths(strings.Join(lines[index+1:end], "\n")), "\n")
-		sections = append(sections, collapsible(summary, content, !isLongBlock(content)))
+		sections = append(sections, collapsible(summary, content, false))
 		index = end
 	}
 	flushPlain()
