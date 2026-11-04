@@ -9,6 +9,100 @@ import (
 	"time"
 )
 
+// TestRenderHTMLBuildsStyledPageAndLinksToolSummaryProtectsCaptureNavigation.
+func TestRenderHTMLBuildsStyledPageAndLinksToolSummaryProtectsCaptureNavigation(t *testing.T) {
+	capture := Capture{
+		AgentLabel: "Claude Code", Renderer: RendererAnthropic, Timestamp: time.Now().UTC(),
+		Method: http.MethodPost, Path: anthropicMessagesPath, StatusCode: 200,
+		RequestBody: []byte(`{"model":"claude-haiku-5-5","system":"Follow this policy","tools":[{"name":"read_file","description":"Read a file","input_schema":{"type":"object"}},{"name":"mcp__clean-view__plan_steps","description":"Plan steps","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"Read <script>alert('x')</script> and ![pixel](https://example.com/track)"},{"role":"assistant","content":"Prior turn."},{"role":"user","content":"As you answer the user’s questions, you can use the following context:\n\n## userEmail\n\nuser@example.com"}]}`),
+		ResponseBody: []byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n" +
+			"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Here is the result.\"}}\n" +
+			"event: message_stop\ndata: {\"type\":\"message_stop\"}\n"),
+	}
+
+	page := RenderHTML(capture)
+	for _, expected := range []string{
+		"<!doctype html>", "<html lang=\"en\" data-design=\"anthropic\">",
+		"<meta name=\"color-scheme\" content=\"light dark\">", "<title>Claude Code — claude-haiku-5-5</title>",
+		"--d-page: #faf9f5", "--d-page: #141413", "--d-focus: #185fa5",
+		"--d-font-heading: \"Poppins\"", "--d-font-body: \"Lora\"",
+		"<label class=\"design-appearance\" for=\"design-mode\">Appearance",
+		"<option value=\"system\" selected>System</option>", "<option value=\"light\">Light</option>", "<option value=\"dark\">Dark</option>",
+		"localStorage.getItem(key)", "matchMedia(\"(prefers-color-scheme: dark)\")", "@media print", "@media (prefers-reduced-motion: reduce)",
+		"<a href=\"#tool-read-file\"><code>read_file</code></a>",
+		"<summary><a id=\"tool-read-file\"></a><code>read_file</code></summary>",
+		"<a href=\"#tool-mcp-clean-view-plan-steps\"><code>mcp__clean-view__plan_steps</code></a>",
+		"<summary><a id=\"tool-mcp-clean-view-plan-steps\"></a><code>mcp__clean-view__plan_steps</code></summary>",
+		"a[href^=\"#tool-\"]", "border-radius: 999px", "a[href^=\"#tool-\"]:hover", "a[href^=\"#tool-\"]:focus-visible",
+		"<details>", "<summary><a id=\"section-system-prompt\"></a>System prompt (18 characters) 📋</summary>",
+		"<summary><a id=\"section-tools\"></a>Tool definitions (2) 🧰</summary>",
+		"<details class=\"msg-user\">", "<summary><a id=\"message-1\"></a>Message 1 · User 🧑</summary>",
+		"<summary><a id=\"message-2\"></a>Message 2 · Assistant 🤖</summary>",
+		"<summary><a id=\"message-3\"></a>Message 3 · User 🧑</summary>",
+		"<a href=\"#message-1\">1</a>", "<a href=\"#message-3\">3</a>",
+		"<summary>Additional context</summary>", "<summary>Assistant response</summary>", "Here is the result.",
+	} {
+		if !strings.Contains(page, expected) {
+			t.Errorf("HTML capture does not contain %q:\n%s", expected, page)
+		}
+	}
+	if strings.Contains(page, "<script>alert") || strings.Contains(page, `<img src=\"https://example.com/track\"`) {
+		t.Errorf("HTML capture rendered untrusted prompt HTML:\n%s", page)
+	}
+	head, _, _ := strings.Cut(page, "</head>")
+	if strings.Contains(head, "<link") || strings.Contains(head, "@import url") {
+		t.Errorf("HTML capture depends on external styles or assets:\n%s", head)
+	}
+	for _, closed := range []string{"<details>\n<summary><a id=\"tool-read-file\"></a>", "<details>\n<summary><a id=\"tool-mcp-clean-view-plan-steps\"></a>"} {
+		if !strings.Contains(page, closed) {
+			t.Errorf("tool definition is not closed by default: %q", closed)
+		}
+	}
+}
+
+// TestRenderHTMLRendersCollapsibleAgentFilesAsMarkdownKeepsLongPromptReadable.
+func TestRenderHTMLRendersCollapsibleAgentFilesAsMarkdownKeepsLongPromptReadable(t *testing.T) {
+	capture := Capture{
+		AgentLabel: "Claude Code", Renderer: RendererAnthropic, Timestamp: time.Now().UTC(),
+		Method: http.MethodPost, Path: anthropicMessagesPath, StatusCode: 200,
+		RequestBody: []byte(`{"model":"claude-haiku-5-5","system":"Contents of /Users/mmcdonnell/.agents/AGENTS.md (user's private global instructions for all projects):\n\n# Communication & Tone\n\n- Keep replies short.\n\nContents of /Users/mmcdonnell/.claude/CLAUDE.md (user’s private global instructions for all projects):\n\n# Claude instructions\n\n- Follow the same guidance.\n\nContents of /Users/mmcdonnell/.claude/rules/LINTER-DIRECTIVES.md (user’s private global instructions for all projects):\n\n# Linter Suppression Directives\n\nUse exact syntax."}`),
+	}
+
+	page := RenderHTML(capture)
+	sections := []struct {
+		summary string
+		content string
+	}{
+		{
+			summary: "<summary>Contents of <code>/Users/mmcdonnell/.agents/AGENTS.md</code> (user&#39;s private global instructions for all projects):</summary>",
+			content: "Communication &amp; Tone</h4>",
+		},
+		{
+			summary: "<summary>Contents of <code>/Users/mmcdonnell/.claude/CLAUDE.md</code> (user’s private global instructions for all projects):</summary>",
+			content: "Claude instructions</h4>",
+		},
+		{
+			summary: "<summary>Contents of <code>/Users/mmcdonnell/.claude/rules/LINTER-DIRECTIVES.md</code> (user’s private global instructions for all projects):</summary>",
+			content: "Linter Suppression Directives</h4>",
+		},
+	}
+	if !strings.Contains(page, "<summary><a id=\"section-system-prompt\"></a>System prompt (") {
+		t.Errorf("HTML capture lacks the collapsible system prompt:\n%s", page)
+	}
+	for _, section := range sections {
+		summaryIndex := strings.Index(page, section.summary)
+		contentIndex := strings.Index(page, section.content)
+		if summaryIndex < 0 || contentIndex <= summaryIndex {
+			t.Errorf("HTML capture does not render embedded file %q after its summary:\n%s", section.summary, page)
+			continue
+		}
+		closeIndex := strings.Index(page[contentIndex:], "</details>")
+		if closeIndex < 0 {
+			t.Errorf("HTML capture does not close embedded file section %q:\n%s", section.summary, page)
+		}
+	}
+}
+
 // TestRenderMarkdownShowsAnthropicPromptAndMasksCredentialsProtectsUsefulCaptures.
 func TestRenderMarkdownShowsAnthropicPromptAndMasksCredentialsProtectsUsefulCaptures(t *testing.T) {
 	capture := Capture{
@@ -19,7 +113,7 @@ func TestRenderMarkdownShowsAnthropicPromptAndMasksCredentialsProtectsUsefulCapt
 		ResponseBody:   []byte(`{"content":[{"type":"text","text":"I can explain it."}]}`),
 	}
 	markdown := RenderMarkdown(capture)
-	for _, expected := range []string{"claude-sonnet", "<summary>System prompt (18 characters)</summary>", "Follow this policy", "### read_file", "Explain this code", "I can explain it.", "[REDACTED]"} {
+	for _, expected := range []string{"claude-sonnet", "<summary><a id=\"section-system-prompt\"></a>System prompt (18 characters) 📋</summary>", "Follow this policy", "<summary><a id=\"tool-read-file\"></a><code>read_file</code></summary>", "Explain this code", "I can explain it.", "[REDACTED]"} {
 		if !strings.Contains(markdown, expected) {
 			t.Errorf("Markdown does not contain %q", expected)
 		}
@@ -50,14 +144,14 @@ func TestRenderMarkdownSummarizesAndFoldsLargeSectionsMakesCapturesScannable(t *
 	markdown := RenderMarkdown(capture)
 	for _, expected := range []string{
 		"# Claude Code — `claude-haiku-5-5`", "## Summary", "- **Upstream status:** 200",
-		"- **Messages:** 1", "- **Tools:** 1 (`read_file`)",
+		"- **Messages:** 1 ([1](#message-1))", "- **Tools:** 1 ([`read_file`](#tool-read-file))",
 		"- **Token usage:** input: 12 · output: 4",
 		"<summary>Token usage details</summary>",
 		"```json\n{\n  \"input_tokens\": 12,\n  \"output_tokens\": 4\n}\n```",
-		"<summary>Request headers (1)</summary>", "## Request",
-		"<summary>System prompt (18 characters)</summary>",
-		"<summary>Tool definitions (1)</summary>", "### User message 1", "Explain this code",
-		"## Response", "### Assistant response", "Here is the answer.",
+		"<summary>Request headers (1)</summary>", "## Request 📨 {#section-request}",
+		"<summary><a id=\"section-system-prompt\"></a>System prompt (18 characters) 📋</summary>",
+		"<summary><a id=\"section-tools\"></a>Tool definitions (1) 🧰</summary>", "Message 1 · User", "Explain this code",
+		"## Response 📬 {#section-response}", "<summary>Assistant response</summary>", "Here is the answer.",
 	} {
 		if !strings.Contains(markdown, expected) {
 			t.Errorf("Markdown does not contain %q", expected)
@@ -82,8 +176,8 @@ func TestRenderMarkdownFencesCompositeParametersAndJSONTextKeepsJSONReadable(t *
 	markdown := RenderMarkdown(capture)
 	for _, expected := range []string{
 		"- **max_tokens**: `128000`", "- **stream**: `true`",
-		"- **thinking**:\n\n  ```json\n  {\n    \"display\": \"summarized\",\n    \"type\": \"adaptive\"\n  }\n  ```",
-		"- **metadata**:\n\n  ```json\n  {\n    \"user_id\": {\n      \"device_id\": \"device-1\",\n      \"session_id\": \"session-1\"\n    }\n  }\n  ```",
+		"- **thinking**:\n\n    ```json\n    {\n      \"display\": \"summarized\",\n      \"type\": \"adaptive\"\n    }\n    ```",
+		"- **metadata**:\n\n    ```json\n    {\n      \"user_id\": {\n        \"device_id\": \"device-1\",\n        \"session_id\": \"session-1\"\n      }\n    }\n    ```",
 		"```json\n{\n  \"ok\": true\n}\n```",
 	} {
 		if !strings.Contains(markdown, expected) {
@@ -108,14 +202,14 @@ func TestRenderMarkdownCollapsesAGENTSContentAndFormatsItsPathsKeepsLongInstruct
 	for _, expected := range []string{
 		"<summary>Contents of <code>/Users/mmcdonnell/.agents/AGENTS.md</code> (user&#39;s private global instructions):</summary>",
 		"# Communication & Tone", "## Chat Execution", "- Keep replies short.",
-		"Contents of `/Users/mmcdonnell/.claude/CLAUDE.md`",
+		"<summary>Contents of <code>/Users/mmcdonnell/.claude/CLAUDE.md</code>:</summary>",
 		"`@~/.agents/AGENTS.md`", "https://example.com/README.md",
 	} {
 		if !strings.Contains(markdown, expected) {
 			t.Errorf("Markdown does not contain %q:\n%s", expected, markdown)
 		}
 	}
-	if strings.Contains(markdown, "```markdown") || !strings.Contains(markdown, "\n\n# Communication & Tone") {
+	if strings.Contains(markdown, "```markdown") || !strings.Contains(markdown, "\n\n#### Communication & Tone") {
 		t.Errorf("AGENTS.md content was escaped or rendered as a code block:\n%s", markdown)
 	}
 }
@@ -168,7 +262,7 @@ func TestRenderMarkdownFormatsOpenAIResponsesRequestsAndStreamsKeepsPromptsAndTo
 			"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":5}}}\n"),
 	}
 	markdown := RenderMarkdown(capture)
-	for _, expected := range []string{"gpt-local", "Use tools carefully", "### read_file", "read this", "### Tool call: read_file", "<summary>Arguments</summary>", "```json\n{\n  \"path\": \"a.go\"\n}\n```", "Answer", "write_file", "completed"} {
+	for _, expected := range []string{"gpt-local", "Use tools carefully", "<summary><a id=\"tool-read-file\"></a><code>read_file</code></summary>", "read this", "### Tool call: read_file", "<summary>Arguments</summary>", "```json\n{\n  \"path\": \"a.go\"\n}\n```", "Answer", "write_file", "completed"} {
 		if !strings.Contains(markdown, expected) {
 			t.Errorf("OpenAI Markdown does not contain %q", expected)
 		}
@@ -184,7 +278,7 @@ func TestRenderMarkdownFormatsGeminiRequestsAndStreamsKeepsItsDistinctWireShapeR
 		ResponseBody: []byte("data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"thinking\",\"thought\":true},{\"text\":\"answer\"},{\"functionCall\":{\"name\":\"search\",\"args\":{\"query\":\"docs\"}}}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":2}}\n"),
 	}
 	markdown := RenderMarkdown(capture)
-	for _, expected := range []string{"gemini-pro", "Follow policy", "### search", "find this", "<summary>Thinking</summary>", "answer", "STOP", "promptTokenCount"} {
+	for _, expected := range []string{"gemini-pro", "Follow policy", "<summary><a id=\"tool-search\"></a><code>search</code></summary>", "find this", "<summary>Thinking</summary>", "answer", "STOP", "promptTokenCount"} {
 		if !strings.Contains(markdown, expected) {
 			t.Errorf("Gemini Markdown does not contain %q", expected)
 		}

@@ -4,9 +4,10 @@ import (
 	"bytes"
 	"compress/gzip"
 	"compress/zlib"
+	_ "embed"
 	"encoding/json"
 	"fmt"
-	"html"
+	stdhtml "html"
 	"io"
 	"maps"
 	"regexp"
@@ -14,7 +15,25 @@ import (
 	"strings"
 )
 
-var markdownFilePath = regexp.MustCompile(`(?:@~|~|/)[A-Za-z0-9._~/-]+\.md`)
+var (
+	markdownFilePath  = regexp.MustCompile(`(?:@~|~|/)[A-Za-z0-9._~/-]+\.md`)
+	invalidToolAnchor = regexp.MustCompile(`[^a-z0-9-]+`)
+)
+
+//go:embed design-anthropic.css
+var designAnthropicCSS string
+
+//go:embed design.css
+var designCSS string
+
+//go:embed design-mode.js
+var designModeJS string
+
+//go:embed reveal.js
+var revealJS string
+
+//go:embed sidebar.js
+var sidebarJS string
 
 var redactedHeaders = map[string]bool{
 	"authorization":  true,
@@ -40,8 +59,8 @@ func RenderMarkdown(capture Capture) string {
 		parts = append(parts, details(fmt.Sprintf("Request headers (%d)", len(capture.RequestHeaders)), headers))
 	}
 	parts = append(parts,
-		"## Request\n\n"+renderRequest(capture.Renderer, request, requestText, decodeWarning),
-		"## Response\n\n"+renderResponse(capture.Renderer, capture.ResponseBody),
+		"## Request 📨 {#section-request}\n\n"+renderRequest(capture.Renderer, request, requestText, decodeWarning),
+		"## Response 📬 {#section-response}\n\n"+renderResponse(capture.Renderer, capture.ResponseBody),
 	)
 	return strings.Join(nonEmpty(parts), "\n\n") + "\n"
 }
@@ -94,16 +113,24 @@ func renderMeta(capture Capture, request map[string]any, model string, usage map
 		fmt.Sprintf("- **Endpoint:** `%s %s`", capture.Method, capture.Path),
 		fmt.Sprintf("- **Upstream status:** %d", capture.StatusCode),
 	}
-	messageCount, hasMessages, toolNames := requestSummary(capture.Renderer, request)
+	messageCount, hasMessages, toolNames, messageAnchors := requestSummary(capture.Renderer, request)
 	if hasMessages {
-		lines = append(lines, fmt.Sprintf("- **Messages:** %d", messageCount))
+		messageSummary := fmt.Sprintf("- **Messages:** %d", messageCount)
+		if len(messageAnchors) > 0 {
+			links := make([]string, len(messageAnchors))
+			for index, anchor := range messageAnchors {
+				links[index] = fmt.Sprintf("[%d](#%s)", index+1, anchor)
+			}
+			messageSummary += " (" + strings.Join(links, ", ") + ")"
+		}
+		lines = append(lines, messageSummary)
 	}
 	if len(toolNames) > 0 {
-		quoted := make([]string, len(toolNames))
+		linked := make([]string, len(toolNames))
 		for index, name := range toolNames {
-			quoted[index] = "`" + name + "`"
+			linked[index] = fmt.Sprintf("[%s](#%s)", markdownLinkLabel(name), toolAnchorID(name))
 		}
-		lines = append(lines, fmt.Sprintf("- **Tools:** %d (%s)", len(toolNames), strings.Join(quoted, ", ")))
+		lines = append(lines, fmt.Sprintf("- **Tools:** %d (%s)", len(toolNames), strings.Join(linked, ", ")))
 	}
 	if summary := tokenUsageSummary(usage); summary != "" {
 		lines = append(lines, "- **Token usage:** "+summary)
@@ -180,8 +207,34 @@ func responseTokenUsage(renderer Renderer, body []byte) map[string]any {
 	return usage
 }
 
+// toolAnchorID creates a stable fragment identifier for a tool definition heading.
+func toolAnchorID(name string) string {
+	slug := strings.Trim(invalidToolAnchor.ReplaceAllString(strings.ToLower(name), "-"), "-")
+	if slug == "" {
+		slug = "unnamed"
+	}
+	return "tool-" + slug
+}
+
+// markdownLinkLabel escapes tool names before placing them in Markdown link labels.
+func markdownLinkLabel(name string) string {
+	return markdownCodeSpan(name)
+}
+
+// markdownCodeSpan wraps text in a Markdown code span without colliding with its backticks.
+func markdownCodeSpan(text string) string {
+	delimiter := "`"
+	for strings.Contains(text, delimiter) {
+		delimiter += "`"
+	}
+	if strings.HasPrefix(text, "`") || strings.HasSuffix(text, "`") || strings.Contains(text, "  ") {
+		text = " " + text + " "
+	}
+	return delimiter + text + delimiter
+}
+
 // requestSummary reads message counts and declared tool names for the capture overview.
-func requestSummary(renderer Renderer, request map[string]any) (int, bool, []string) {
+func requestSummary(renderer Renderer, request map[string]any) (int, bool, []string, []string) {
 	messages := array(request["messages"])
 	tools := array(request["tools"])
 	hasMessages := len(messages) > 0
@@ -191,13 +244,9 @@ func requestSummary(renderer Renderer, request map[string]any) (int, bool, []str
 	case RendererOpenAI:
 		if len(messages) == 0 {
 			if input, ok := request["input"].(string); ok {
-				messages = []any{input}
+				messages = []any{map[string]any{"role": "user", "content": input}}
 			} else {
-				for _, item := range array(request["input"]) {
-					if stringValue(object(item)["type"], "message") == "message" {
-						messages = append(messages, item)
-					}
-				}
+				messages = append(messages, array(request["input"])...)
 			}
 		}
 		_, hasInput := request["input"]
@@ -209,6 +258,10 @@ func requestSummary(renderer Renderer, request map[string]any) (int, bool, []str
 		messages = array(request["contents"])
 		tools = array(request["tools"])
 		_, hasMessages = request["contents"]
+	}
+	messageAnchors := make([]string, 0, len(messages))
+	for index := range messages {
+		messageAnchors = append(messageAnchors, messageAnchorID(index+1))
 	}
 	toolNames := make([]string, 0, len(tools))
 	for _, raw := range tools {
@@ -225,7 +278,7 @@ func requestSummary(renderer Renderer, request map[string]any) (int, bool, []str
 		}
 		toolNames = append(toolNames, stringValue(function["name"], "(unnamed)"))
 	}
-	return len(messages), hasMessages, toolNames
+	return len(messages), hasMessages, toolNames, messageAnchors
 }
 
 // renderHeaders writes request headers while masking common credential fields.
@@ -277,8 +330,8 @@ func renderRequest(renderer Renderer, request any, requestText, decodeWarning st
 func renderAnthropicRequest(request map[string]any) string {
 	parts := renderParams(request, []string{"max_tokens", "temperature", "top_p", "top_k", "stream", "stop_sequences", "tool_choice", thinkingContentType, "metadata"})
 	if system, ok := request["system"]; ok {
-		content := renderAnthropicContent(system)
-		parts = append(parts, details(fmt.Sprintf("System prompt (%d characters)", len(content)), content))
+		content := renderAnthropicContent(system, false)
+		parts = append(parts, foldableWithNote(sectionSummary("section-system-prompt", fmt.Sprintf("System prompt (%d characters) 📋", len(content))), noteSystemPrompt, content))
 	}
 	if tools := array(request["tools"]); len(tools) > 0 {
 		parts = append(parts, renderAnthropicTools(tools))
@@ -293,41 +346,58 @@ func renderAnthropicTools(tools []any) string {
 	for _, value := range tools {
 		tool := object(value)
 		name := stringValue(tool["name"], "(unnamed tool)")
-		lines := []string{"### " + name, ""}
+		var content []string
 		if description := stringValue(tool["description"], ""); description != "" {
-			lines = append(lines, description, "")
+			content = append(content, description)
 		}
 		if schema, ok := tool["input_schema"]; ok {
-			lines = append(lines, fenceJSON(schema))
+			content = append(content, fenceJSON(schema))
 		}
-		rendered = append(rendered, strings.Join(lines, "\n"))
+		rendered = append(rendered, renderToolDefinition(name, strings.Join(content, "\n\n")))
 	}
-	return details(fmt.Sprintf("Tool definitions (%d)", len(rendered)), strings.Join(rendered, "\n\n"))
+	return toolDefinitionsFold(rendered)
 }
 
 // renderAnthropicMessage renders a message's text, tool use, tool results, and images.
 func renderAnthropicMessage(message any) string {
 	item := object(message)
-	return renderAnthropicContent(item["content"])
+	return renderAnthropicContent(item["content"], stringValue(item["role"], "") == "user")
 }
 
-// renderAnthropicContent formats content blocks while replacing embedded image bytes with a note.
-func renderAnthropicContent(content any) string {
+// renderAnthropicContent formats content blocks while replacing embedded image bytes with a note. typed marks the user's own text, which keeps its line breaks.
+func renderAnthropicContent(content any, typed bool) string {
+	renderText := renderMarkdownText
+	if typed {
+		renderText = renderTypedText
+	}
 	if text, ok := content.(string); ok {
-		return renderMarkdownText(text)
+		return renderText(text)
 	}
 	blocks, ok := content.([]any)
 	if !ok {
 		return fenceJSON(content)
 	}
 	var parts []string
+	var command []string
+	flushCommand := func() {
+		if len(command) > 0 {
+			parts = append(parts, localCommandBox(command))
+			command = nil
+		}
+	}
 	for _, raw := range blocks {
 		block := object(raw)
+		text := stringValue(block[textContentType], "")
+		if stringValue(block["type"], "") == textContentType && isLocalCommandText(text) {
+			command = append(command, text)
+			continue
+		}
+		flushCommand()
 		switch stringValue(block["type"], "") {
 		case textContentType:
-			parts = append(parts, renderMarkdownText(stringValue(block[textContentType], "")))
+			parts = append(parts, renderText(text))
 		case thinkingContentType:
-			parts = append(parts, details("Thinking", stringValue(block[thinkingContentType], "")))
+			parts = append(parts, foldable("Thinking", stringValue(block[thinkingContentType], "")))
 		case "tool_use":
 			parts = append(parts, renderToolUse(stringValue(block["name"], ""), stringValue(block["id"], ""), fenceJSON(block["input"])))
 		case "tool_result":
@@ -335,14 +405,51 @@ func renderAnthropicContent(content any) string {
 			if id := stringValue(block["tool_use_id"], ""); id != "" {
 				label += " for " + id
 			}
-			parts = append(parts, "### "+label+"\n\n"+renderAnthropicContent(block["content"]))
+			parts = append(parts, "### "+label+"\n\n"+renderAnthropicContent(block["content"], false))
 		case "image":
 			parts = append(parts, imageNote(object(block["source"])))
 		default:
 			parts = append(parts, fenceJSON(raw))
 		}
 	}
+	flushCommand()
 	return strings.Join(parts, "\n\n")
+}
+
+// localCommandTag matches Claude Code's wrappers around a locally run slash command.
+var localCommandTag = regexp.MustCompile(`</?(?:local-command-[a-z]+|command-[a-z]+)>`)
+
+// commandMetadata matches the name, message, and argument elements; the name moves into the summary.
+var commandMetadata = regexp.MustCompile(`<command-(?:name|message|args)>[\s\S]*?</command-[a-z]+>`)
+
+// commandNameTag captures the slash command name, such as /model.
+var commandNameTag = regexp.MustCompile(`<command-name>\s*([\s\S]*?)\s*</command-name>`)
+
+// isLocalCommandText reports whether a text block is part of a slash command run locally.
+func isLocalCommandText(text string) bool {
+	return localCommandTag.MatchString(text)
+}
+
+// localCommandBox folds the blocks of one slash command into a closed box titled with the command name.
+func localCommandBox(blocks []string) string {
+	name := ""
+	var bodies []string
+	for _, block := range blocks {
+		if name == "" {
+			if match := commandNameTag.FindStringSubmatch(block); match != nil {
+				name = match[1]
+			}
+		}
+		body := strings.TrimSpace(localCommandTag.ReplaceAllString(commandMetadata.ReplaceAllString(block, ""), ""))
+		if body != "" {
+			bodies = append(bodies, body)
+		}
+	}
+	summary := "Local command"
+	if name != "" {
+		summary += ": " + name
+	}
+	return details(summary, renderMarkdownText(strings.Join(bodies, "\n\n")))
 }
 
 // renderOpenAIRequest extracts Responses and Chat Completions request fields.
@@ -350,7 +457,7 @@ func renderOpenAIRequest(request map[string]any) string {
 	parts := renderParams(request, []string{"max_tokens", "max_output_tokens", "temperature", "top_p", "stream", "stop", "tool_choice", "reasoning", "metadata"})
 	if instructions := stringValue(request["instructions"], ""); instructions != "" {
 		instructions = renderMarkdownText(instructions)
-		parts = append(parts, details(fmt.Sprintf("System prompt (%d characters)", len(instructions)), instructions))
+		parts = append(parts, foldableWithNote(sectionSummary("section-system-prompt", fmt.Sprintf("System prompt (%d characters) 📋", len(instructions))), noteSystemPrompt, instructions))
 	}
 	if tools := array(request["tools"]); len(tools) > 0 {
 		parts = append(parts, renderOpenAITools(tools))
@@ -375,16 +482,16 @@ func renderOpenAITools(tools []any) string {
 			function = tool
 		}
 		name := stringValue(function["name"], stringValue(tool["type"], "(unnamed tool)"))
-		lines := []string{"### " + name, ""}
+		var content []string
 		if description := stringValue(function["description"], ""); description != "" {
-			lines = append(lines, description, "")
+			content = append(content, description)
 		}
 		if schema, ok := function["parameters"]; ok {
-			lines = append(lines, fenceJSON(schema))
+			content = append(content, fenceJSON(schema))
 		}
-		rendered = append(rendered, strings.Join(lines, "\n"))
+		rendered = append(rendered, renderToolDefinition(name, strings.Join(content, "\n\n")))
 	}
-	return details(fmt.Sprintf("Tool definitions (%d)", len(rendered)), strings.Join(rendered, "\n\n"))
+	return toolDefinitionsFold(rendered)
 }
 
 // renderOpenAIChatMessage formats Chat Completions message content and tool calls.
@@ -442,7 +549,7 @@ func renderGeminiRequest(raw any) string {
 		} else {
 			content = renderGeminiParts(object(system)["parts"])
 		}
-		parts = append(parts, details(fmt.Sprintf("System prompt (%d characters)", len(content)), content))
+		parts = append(parts, foldableWithNote(sectionSummary("section-system-prompt", fmt.Sprintf("System prompt (%d characters) 📋", len(content))), noteSystemPrompt, content))
 	}
 	if tools := array(request["tools"]); len(tools) > 0 {
 		parts = append(parts, renderGeminiTools(tools))
@@ -459,26 +566,27 @@ func renderGeminiTools(tools []any) string {
 		declarations := array(tool["functionDeclarations"])
 		for _, declaration := range declarations {
 			function := object(declaration)
-			text := "### " + stringValue(function["name"], "(unnamed tool)") + "\n\n"
+			name := stringValue(function["name"], "(unnamed tool)")
+			var content []string
 			if description := stringValue(function["description"], ""); description != "" {
-				text += description + "\n\n"
+				content = append(content, description)
 			}
 			schema := function["parametersJsonSchema"]
 			if schema == nil {
 				schema = function["parameters"]
 			}
 			if schema != nil {
-				text += fenceJSON(schema)
+				content = append(content, fenceJSON(schema))
 			}
-			rendered = append(rendered, text)
+			rendered = append(rendered, renderToolDefinition(name, strings.Join(content, "\n\n")))
 		}
 		if len(declarations) == 0 {
 			for name, value := range tool {
-				rendered = append(rendered, "### "+name+"\n\n"+fenceJSON(value))
+				rendered = append(rendered, renderToolDefinition(name, fenceJSON(value)))
 			}
 		}
 	}
-	return details(fmt.Sprintf("Tool definitions (%d)", len(rendered)), strings.Join(rendered, "\n\n"))
+	return toolDefinitionsFold(rendered)
 }
 
 // renderGeminiMessage formats one Gemini content item.
@@ -496,7 +604,7 @@ func renderGeminiParts(raw any) string {
 		part := object(value)
 		if text, ok := part[textContentType].(string); ok {
 			if thought, ok := part["thought"].(bool); ok && thought {
-				parts = append(parts, details("Thinking", renderMarkdownText(text)))
+				parts = append(parts, foldable("Thinking", renderMarkdownText(text)))
 			} else {
 				parts = append(parts, renderMarkdownText(text))
 			}
@@ -528,9 +636,9 @@ func renderResponse(renderer Renderer, body []byte) string {
 	if !looksLikeSSE(raw) {
 		var value any
 		if err := json.Unmarshal(body, &value); err == nil {
-			return fenceJSON(value)
+			return foldable("Response body", fenceJSON(value))
 		}
-		return fence(raw, "")
+		return foldable("Response body", fence(raw, ""))
 	}
 	events := sseEvents(raw)
 	switch renderer {
@@ -601,9 +709,9 @@ func renderAnthropicEvents(events []any, raw string) string {
 		text := stringValue(block[textContentType], "")
 		switch stringValue(block["type"], textContentType) {
 		case textContentType:
-			parts = append(parts, "### Assistant response\n\n"+renderMarkdownText(text))
+			parts = append(parts, foldable("Assistant response", renderMarkdownText(text)))
 		case thinkingContentType:
-			parts = append(parts, details("Thinking", renderMarkdownText(text)))
+			parts = append(parts, foldable("Thinking", renderMarkdownText(text)))
 		case "tool_use":
 			parts = append(parts, renderToolUse(stringValue(block["name"], ""), stringValue(block["id"], ""), fenceJSONText(text)))
 		}
@@ -656,7 +764,7 @@ func renderOpenAIEvents(events []any, raw string) string {
 		parts = append(parts, "- **finish reason**: "+finish)
 	}
 	if text.Len() > 0 {
-		parts = append(parts, "### Assistant response\n\n"+renderMarkdownText(text.String()))
+		parts = append(parts, foldable("Assistant response", renderMarkdownText(text.String())))
 	}
 	keys := make([]int, 0, len(tools))
 	for index := range tools {
@@ -708,7 +816,7 @@ func renderOpenAIResponsesEvents(events []any, raw string) string {
 		parts = append(parts, "- **status**: "+status)
 	}
 	if text.Len() > 0 {
-		parts = append(parts, "### Assistant response\n\n"+renderMarkdownText(text.String()))
+		parts = append(parts, foldable("Assistant response", renderMarkdownText(text.String())))
 	}
 	for key, tool := range tools {
 		parts = append(parts, renderToolUse(tool["name"], key, fenceJSONText(defaultString(tool["arguments"], "{}"))))
@@ -756,10 +864,10 @@ func renderGeminiEvents(events []any, raw string) string {
 		parts = append(parts, "- **finish reason**: "+finish)
 	}
 	if thinking.Len() > 0 {
-		parts = append(parts, details("Thinking", renderMarkdownText(thinking.String())))
+		parts = append(parts, foldable("Thinking", renderMarkdownText(thinking.String())))
 	}
 	if text.Len() > 0 {
-		parts = append(parts, "### Assistant response\n\n"+renderMarkdownText(text.String()))
+		parts = append(parts, foldable("Assistant response", renderMarkdownText(text.String())))
 	}
 	parts = append(parts, calls...)
 	if len(parts) == 0 {
@@ -793,18 +901,27 @@ func looksLikeSSE(raw string) bool {
 	return strings.Contains(raw, "data:") || strings.Contains(raw, "event:")
 }
 
-// renderMessageList separates each conversation turn under a role-labelled heading.
+// renderMessageList gives every conversation turn a numbered card that the summary can link to, and folds the cards into one Messages box.
 func renderMessageList(messages []any, renderContent func(any) string) string {
 	rendered := make([]string, 0, len(messages))
 	for index, raw := range messages {
-		message := object(raw)
-		role := stringValue(message["role"], stringValue(message["type"], "unknown"))
-		if role != "" {
-			role = strings.ToUpper(role[:1]) + role[1:]
-		}
-		rendered = append(rendered, fmt.Sprintf("### %s message %d\n\n%s", role, index+1, renderContent(raw)))
+		rendered = append(rendered, messageCard(index+1, messageRole(raw), messageBody(renderContent(raw), messageSourceLines(raw))))
 	}
-	return strings.Join(rendered, "\n\n")
+	if len(rendered) == 0 {
+		return ""
+	}
+	return messagesBox(len(rendered), strings.Join(rendered, "\n\n"))
+}
+
+// messageRole returns the wire-format role used to number a conversation turn.
+func messageRole(raw any) string {
+	message := object(raw)
+	return strings.ToLower(stringValue(message["role"], stringValue(message["type"], "unknown")))
+}
+
+// messageAnchorID creates the stable fragment identifier for a numbered message card.
+func messageAnchorID(number int) string {
+	return fmt.Sprintf("message-%d", number)
 }
 
 // renderParams lists only parameters present in the request object.
@@ -817,8 +934,9 @@ func renderParams(values map[string]any, keys []string) []string {
 		}
 		switch value.(type) {
 		case map[string]any, []any:
-			block := strings.ReplaceAll(fenceJSON(value), "\n", "\n  ")
-			entries = append(entries, "- **"+key+"**:\n\n  "+block)
+			// Four spaces keep the fence inside its bullet's list item; two would end the list before it.
+			block := strings.ReplaceAll(fenceJSON(value), "\n", "\n    ")
+			entries = append(entries, "- **"+key+"**:\n\n    "+block)
 		default:
 			entries = append(entries, "- **"+key+"**: `"+compactJSON(value)+"`")
 		}
@@ -943,18 +1061,22 @@ func fence(text, language string) string {
 	return "```" + language + "\n" + text + "\n```"
 }
 
-// details folds verbose content under a readable summary while preserving the original text.
-func details(summary, content string) string {
-	return detailsWithHTMLSummary(html.EscapeString(summary), content)
-}
-
-// detailsWithHTMLSummary wraps content when its summary already contains safe inline HTML.
-func detailsWithHTMLSummary(summary, content string) string {
-	return "<details>\n<summary>" + summary + "</summary>\n\n" + content + "\n\n</details>"
-}
-
 // renderMarkdownText preserves prose Markdown, formats standalone JSON, paths, and large AGENTS files.
 func renderMarkdownText(text string) string {
+	return renderTextBlock(text, false)
+}
+
+// renderTypedText renders what the user typed, keeping its line breaks. Blocks Claude Code injects, such as system reminders and command output, keep normal Markdown wrapping.
+func renderTypedText(text string) string {
+	trimmed := strings.TrimSpace(text)
+	if strings.HasPrefix(trimmed, "<system-reminder>") || strings.HasPrefix(trimmed, "<local-command-") || strings.HasPrefix(trimmed, "<command-") {
+		return renderMarkdownText(text)
+	}
+	return renderTextBlock(text, true)
+}
+
+// renderTextBlock formats standalone JSON and otherwise renders Markdown, keeping prose line breaks when typed is set.
+func renderTextBlock(text string, typed bool) string {
 	trimmed := strings.TrimSpace(text)
 	if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
 		var value any
@@ -962,11 +1084,40 @@ func renderMarkdownText(text string) string {
 			return fenceJSON(value)
 		}
 	}
-	return renderAgentMarkdown(text)
+	return renderAgentMarkdown(text, typed)
 }
 
-// renderAgentMarkdown collapses injected AGENTS.md content while leaving its Markdown rendered.
-func renderAgentMarkdown(text string) string {
+// orderedListItem matches a numbered list item, whose line must not gain a hard break.
+var orderedListItem = regexp.MustCompile(`^\d+[.)]`)
+
+// isProseLine reports whether a line is ordinary paragraph text rather than blank, indented, or the start of a heading, quote, list, table, fence, or rule.
+func isProseLine(line string) bool {
+	if line == "" || strings.ContainsAny(line[:1], " \t#>|-*+=_`~") {
+		return false
+	}
+	return !orderedListItem.MatchString(line)
+}
+
+// hardLineBreaks ends a prose line with two spaces when the next line continues the same paragraph, so the renderer keeps the break. Fenced code is left as written.
+func hardLineBreaks(text string) string {
+	lines := strings.Split(text, "\n")
+	inFence := false
+	for index := range len(lines) - 1 {
+		trimmed := strings.TrimSpace(lines[index])
+		if strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
+			inFence = !inFence
+			continue
+		}
+		if !inFence && isProseLine(lines[index]) && isProseLine(lines[index+1]) {
+			lines[index] += "  "
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// renderAgentMarkdown collapses embedded Markdown files while leaving their content rendered. typed marks the user's own prose, whose line breaks are kept.
+func renderAgentMarkdown(text string, typed bool) string {
+	text = demoteHeadings(text)
 	lines := strings.Split(text, "\n")
 	var sections []string
 	var plain []string
@@ -974,11 +1125,21 @@ func renderAgentMarkdown(text string) string {
 		if len(plain) == 0 {
 			return
 		}
-		sections = append(sections, formatMarkdownPaths(strings.Join(plain, "\n")))
+		prose := formatMarkdownPaths(strings.Join(plain, "\n"))
+		if typed {
+			prose = hardLineBreaks(prose)
+		}
+		sections = append(sections, prose)
 		plain = nil
 	}
 	for index := 0; index < len(lines); {
-		path, suffix, ok := agentsMarkdownHeader(lines[index])
+		if isAdditionalContextHeader(lines[index]) {
+			flushPlain()
+			content := renderAgentMarkdown(strings.Join(lines[index+1:], "\n"), false)
+			sections = append(sections, foldable("Additional context", content))
+			break
+		}
+		path, suffix, ok := embeddedMarkdownHeader(lines[index])
 		if !ok {
 			plain = append(plain, lines[index])
 			index++
@@ -988,22 +1149,34 @@ func renderAgentMarkdown(text string) string {
 		end := index + 1
 		for end < len(lines) {
 			line := strings.TrimSpace(lines[end])
-			if strings.HasPrefix(line, "Contents of ") && strings.Contains(line, ".md") {
+			if isEmbeddedMarkdownHeader(line) || isAdditionalContextHeader(line) {
 				break
 			}
 			end++
 		}
-		summary := "Contents of <code>" + html.EscapeString(path) + "</code>" + html.EscapeString(suffix)
+		summary := "Contents of <code>" + stdhtml.EscapeString(path) + "</code>" + stdhtml.EscapeString(suffix)
 		content := strings.Trim(formatMarkdownPaths(strings.Join(lines[index+1:end], "\n")), "\n")
-		sections = append(sections, detailsWithHTMLSummary(summary, content))
+		sections = append(sections, collapsible(summary, content, !isLongBlock(content)))
 		index = end
 	}
 	flushPlain()
 	return strings.Join(nonEmpty(sections), "\n\n")
 }
 
-// agentsMarkdownHeader identifies a prompt section that embeds an AGENTS.md file.
-func agentsMarkdownHeader(line string) (path, suffix string, ok bool) {
+// embeddedMarkdownHeader identifies a prompt section that embeds a Markdown file.
+func isEmbeddedMarkdownHeader(line string) bool {
+	_, _, ok := embeddedMarkdownHeader(line)
+	return ok
+}
+
+// isAdditionalContextHeader recognizes Claude Code's injected user-context preamble.
+func isAdditionalContextHeader(line string) bool {
+	line = strings.ToLower(strings.TrimSpace(line))
+	return strings.HasPrefix(line, "as you answer the user") && strings.Contains(line, "you can use the following context:")
+}
+
+// embeddedMarkdownHeader identifies a prompt section that embeds a Markdown file.
+func embeddedMarkdownHeader(line string) (path, suffix string, ok bool) {
 	content, found := strings.CutPrefix(strings.TrimSpace(line), "Contents of ")
 	if !found {
 		return "", "", false
@@ -1013,9 +1186,6 @@ func agentsMarkdownHeader(line string) (path, suffix string, ok bool) {
 		return "", "", false
 	}
 	path = content[:end+3]
-	if !strings.HasSuffix(path, "/AGENTS.md") && path != "AGENTS.md" {
-		return "", "", false
-	}
 	return path, content[end+3:], true
 }
 
@@ -1058,13 +1228,20 @@ func formatMarkdownPaths(text string) string {
 	return strings.Join(lines, "\n")
 }
 
+// renderToolDefinition folds one declared tool under a summary that doubles as its navigation target.
+func renderToolDefinition(name, content string) string {
+	anchor := toolAnchorID(name)
+	summary := `<a id="` + anchor + `"></a><code>` + stdhtml.EscapeString(name) + `</code>`
+	return collapsible(summary, content, false)
+}
+
 // renderToolUse labels a tool call and folds its argument payload out of the conversation.
 func renderToolUse(name, id, arguments string) string {
 	heading := "### Tool call: " + name
 	if id != "" {
 		heading += " (`" + id + "`)"
 	}
-	return heading + "\n\n" + details("Arguments", arguments)
+	return heading + "\n\n" + foldable("Arguments", arguments)
 }
 
 // jsonOrText returns parsed JSON when available, otherwise the original text.

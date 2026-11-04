@@ -206,7 +206,7 @@ func buildAgentCatalogue() []agentEntry {
 				{id: string(RendererOpenAI), label: "OpenAI API key", host: "api.openai.com", renderer: RendererOpenAI, suffix: openAIAPIPrefix, binary: agentPiID, setup: []SetupFile{piModels(string(RendererOpenAI), baseURLPlaceholder, "")}, customFor: []Renderer{RendererOpenAI, RendererRaw}},
 				{id: agentCodexID, label: "ChatGPT subscription (Codex)", host: "chatgpt.com", renderer: RendererOpenAI, suffix: "/backend-api", binary: agentPiID, setup: []SetupFile{piModels("openai-codex", baseURLPlaceholder, ""), {Path: "~/.pi/agent/settings.json", Language: jsonLanguage, Body: `{
   "transport": "sse"
-}`}}, notes: []string{"SSE is required because the logger only handles HTTP, not Pi's default WebSocket transport."}, warnings: []string{"Pi compresses this route with zstd. The exact request bytes are saved, but the standard-library build cannot decode zstd for the readable Markdown capture."}},
+}`}}, notes: []string{"SSE is required because the logger only handles HTTP, not Pi's default WebSocket transport."}, warnings: []string{"Pi compresses this route with zstd. The exact request bytes are saved, but the standard-library build cannot decode zstd for the HTML capture."}},
 			},
 		},
 		{

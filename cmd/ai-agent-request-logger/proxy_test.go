@@ -79,15 +79,15 @@ func TestProxyForwardsAuthAndCapturesModelRequestProtectsTheSSOHeaderAndCaptureC
 	if len(entries) != 3 {
 		t.Fatalf("capture files = %d, want 3", len(entries))
 	}
-	var markdown string
+	var htmlCapture string
 	for _, entry := range entries {
 		data, err := os.ReadFile(filepath.Join(logDir, entry.Name()))
 		if err != nil {
 			t.Fatalf("read %s: %v", entry.Name(), err)
 		}
 		switch filepath.Ext(entry.Name()) {
-		case ".md":
-			markdown = string(data)
+		case ".html":
+			htmlCapture = string(data)
 		case ".txt":
 			if strings.HasSuffix(entry.Name(), ".request.txt") && string(data) != requestBody {
 				t.Errorf("raw request capture = %q, want original bytes", string(data))
@@ -97,13 +97,16 @@ func TestProxyForwardsAuthAndCapturesModelRequestProtectsTheSSOHeaderAndCaptureC
 			}
 		}
 	}
-	for _, expected := range []string{"<summary>System prompt (13 characters)</summary>", "follow policy", "### read", "hello", "[REDACTED]"} {
-		if !strings.Contains(markdown, expected) {
-			t.Errorf("Markdown capture does not contain %q", expected)
+	for _, expected := range []string{"<html", "follow policy", "read", "hello", "[REDACTED]"} {
+		if !strings.Contains(htmlCapture, expected) {
+			t.Errorf("HTML capture does not contain %q", expected)
 		}
 	}
-	if strings.Contains(markdown, "enterprise-session-token") {
-		t.Error("Markdown capture exposed the session credential")
+	if htmlCapture == "" {
+		t.Fatal("HTML capture is missing")
+	}
+	if strings.Contains(htmlCapture, "enterprise-session-token") {
+		t.Error("HTML capture exposed the session credential")
 	}
 }
 

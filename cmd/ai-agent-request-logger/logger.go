@@ -105,7 +105,7 @@ type Target struct {
 
 // Capture contains one completed API exchange and the details needed to render it.
 type Capture struct {
-	// AgentLabel identifies the harness in the Markdown document.
+	// AgentLabel identifies the harness in the HTML capture document.
 	AgentLabel string
 	// Renderer selects the request and response formatter.
 	Renderer Renderer

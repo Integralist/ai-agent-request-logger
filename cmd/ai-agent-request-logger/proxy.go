@@ -140,7 +140,7 @@ func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		p.logger.LogAttrs(req.Context(), slog.LevelError, "write_capture", slog.Any("err", err))
 		return
 	}
-	p.logger.LogAttrs(req.Context(), slog.LevelInfo, "capture_written", slog.String("path", p.captureBase(capture)+".md"), slog.Int("status", capture.StatusCode))
+	p.logger.LogAttrs(req.Context(), slog.LevelInfo, "capture_written", slog.String("path", p.captureBase(capture)+".html"), slog.Int("status", capture.StatusCode))
 }
 
 // upstreamURL joins the provider base path with the harness request path and query.
@@ -179,7 +179,7 @@ func (p *proxyHandler) shouldCapture(ctx context.Context, capture Capture) bool 
 	return false
 }
 
-// writeCapture saves the raw exchange and a readable Markdown rendering with private file permissions.
+// writeCapture saves the raw exchange and a styled HTML rendering with private file permissions.
 func (p *proxyHandler) writeCapture(capture Capture) error {
 	if err := os.MkdirAll(p.logDir, defaultPrivateDirectoryMode); err != nil {
 		return fmt.Errorf("proxy: create log directory: %w", err)
@@ -194,7 +194,7 @@ func (p *proxyHandler) writeCapture(capture Capture) error {
 	}{
 		{name: base + ".request.txt", body: capture.RequestBody},
 		{name: base + ".response.txt", body: capture.ResponseBody},
-		{name: base + ".md", body: []byte(RenderMarkdown(capture))},
+		{name: base + ".html", body: []byte(RenderHTML(capture))},
 	}
 	for _, file := range files {
 		if err := writePrivateFile(filepath.Join(p.logDir, file.name), file.body); err != nil {
