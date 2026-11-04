@@ -195,6 +195,15 @@ func buildAgentCatalogue() []agentEntry {
 }`}},
 					warnings: []string{"A ChatGPT login uses a different host and does not go through this route. Use an OpenAI API key."},
 				},
+				{
+					id: "github-copilot", label: "GitHub Copilot", host: "api.githubcopilot.com", renderer: RendererOpenAI, binary: agentOpenCodeID,
+					notes: []string{
+						"Step 1 (before or after opening OpenCode): point OpenCode's credentials at the proxy:\n  sqlite3 ~/.local/share/opencode/opencode.db \"UPDATE credential SET value = json_set(value, '$.metadata.apiEndpoint', '{baseUrl}') WHERE integration_id = 'github-copilot';\" && opencode service restart",
+						"Step 2: in OpenCode, select your Copilot model (e.g. GPT-5.6 Terra) and send a prompt.",
+						"Step 3 (when finished logging): restore direct Copilot access:\n  sqlite3 ~/.local/share/opencode/opencode.db \"UPDATE credential SET value = json_remove(value, '$.metadata.apiEndpoint') WHERE integration_id = 'github-copilot';\" && opencode service restart",
+					},
+					warnings: []string{"The apiEndpoint setting is durable in opencode.db. When the proxy is not running, OpenCode Copilot requests will fail until removed."},
+				},
 			},
 		},
 		{
@@ -293,7 +302,7 @@ func ResolveChoice(choice AgentChoice, port int) (Target, error) {
 		AgentID: agent.id, AgentLabel: agent.label, ProviderID: provider.id, ProviderLabel: provider.label,
 		UpstreamHost: provider.host, UpstreamBaseURL: "https://" + provider.host,
 		Renderer: provider.renderer, BaseURL: baseURL, Command: buildCommand(provider, baseURL),
-		Setup: fillSetup(provider.setup, baseURL), Notes: append([]string(nil), provider.notes...), Warnings: append([]string(nil), provider.warnings...),
+		Setup: fillSetup(provider.setup, baseURL), Notes: fillNotes(provider.notes, baseURL), Warnings: append([]string(nil), provider.warnings...),
 	}, nil
 }
 
@@ -331,7 +340,7 @@ func resolveCustomTarget(agent agentEntry, choice AgentChoice, port int) (Target
 		command = agent.id
 		setup = nil
 	}
-	notes := append([]string(nil), provider.notes...)
+	notes := fillNotes(provider.notes, baseURL)
 	if renderer == RendererRaw {
 		notes = append(notes, "The wire format is unknown, so captures use a raw JSON rendering rather than guessing at the request structure.")
 	}
@@ -390,6 +399,15 @@ func fillSetup(files []SetupFile, baseURL string) []SetupFile {
 	for i, file := range files {
 		file.Body = strings.ReplaceAll(file.Body, baseURLPlaceholder, baseURL)
 		filled[i] = file
+	}
+	return filled
+}
+
+// fillNotes replaces the local proxy placeholder in each generated note.
+func fillNotes(notes []string, baseURL string) []string {
+	filled := make([]string, len(notes))
+	for i, note := range notes {
+		filled[i] = strings.ReplaceAll(note, baseURLPlaceholder, baseURL)
 	}
 	return filled
 }

@@ -24,9 +24,14 @@ a browser.
 3. Answer the setup questions: your agent, then its provider. The logger
    prints the configuration and the command that launches your agent, then
    waits for requests.
+
 4. In a second terminal, run the printed command and send a prompt.
+
 5. Open the newest `.html` file in `.ai-agent-request-logger/logs/`, under the
    directory where you started the logger.
+
+> [!TIP]
+> `open $(/bin/ls *.html)`
 
 The logger remembers your choice under your operating system's user config
 directory. Run `ai-agent-request-logger --force` to choose again.
@@ -40,13 +45,13 @@ committed:
 
 ## Choose your route
 
-| Agent | Provider options | Setup |
-| --- | --- | --- |
-| Claude Code | Anthropic, Google Vertex AI | [Claude Code](#claude-code) |
-| Pi | Anthropic, OpenAI API key, ChatGPT subscription (Codex), Custom base URL | [Pi](#pi) |
-| GitHub Copilot CLI | GitHub subscription | [GitHub Copilot CLI](#github-copilot-cli) |
-| Codex, OpenCode, OMP, Gemini CLI, Antigravity CLI, Junie | Shown by the wizard | [Other agents](#other-agents) |
-| Cursor CLI, Amp | Cannot be captured | [Limits](#limits) |
+| Agent                                                    | Provider options                                                         | Setup                                     |
+| -------------------------------------------------------- | ------------------------------------------------------------------------ | ----------------------------------------- |
+| Claude Code                                              | Anthropic, Google Vertex AI                                              | [Claude Code](#claude-code)               |
+| Pi                                                       | Anthropic, OpenAI API key, ChatGPT subscription (Codex), Custom base URL | [Pi](#pi)                                 |
+| GitHub Copilot CLI                                       | GitHub subscription                                                      | [GitHub Copilot CLI](#github-copilot-cli) |
+| Codex, OpenCode, OMP, Gemini CLI, Antigravity CLI, Junie | Shown by the wizard                                                      | [Other agents](#other-agents)             |
+| Cursor CLI, Amp                                          | Cannot be captured                                                       | [Limits](#limits)                         |
 
 ## Set up each agent
 
@@ -55,8 +60,10 @@ committed:
 Use this route for a Claude Code subscription signed in with SSO.
 
 1. Sign in to Claude Code as usual.
+
 2. In the logger, choose **Claude Code**, then **Anthropic**. If Claude Code
    uses Google Vertex AI, choose **Google Vertex AI** instead.
+
 3. In a second terminal, run the printed command. On macOS and Linux it looks
    like this:
 
@@ -87,12 +94,12 @@ Pi has no base-URL option. The logger prints a snippet for
 `~/.pi/agent/models.json`. Merge it into your existing file rather than
 replacing it. The key is `baseUrl`.
 
-| Route in the wizard | Extra setup |
-| --- | --- |
-| Anthropic | None; Pi's sign-in supplies the credential |
-| OpenAI API key | Keep the key in Pi's auth setup |
-| ChatGPT subscription (Codex) | Set SSE transport, see below |
-| Custom base URL | Choose the wire format, then enter a model ID |
+| Route in the wizard          | Extra setup                                   |
+| ---------------------------- | --------------------------------------------- |
+| Anthropic                    | None; Pi's sign-in supplies the credential    |
+| OpenAI API key               | Keep the key in Pi's auth setup               |
+| ChatGPT subscription (Codex) | Set SSE transport, see below                  |
+| Custom base URL              | Choose the wire format, then enter a model ID |
 
 The Codex route needs `"transport": "sse"` in `~/.pi/agent/settings.json`.
 The logger handles only HTTP, and Pi's default transport can choose WebSockets.
@@ -170,11 +177,11 @@ calls, such as token counting, are forwarded but not saved.
 
 ## Command options
 
-| Option | Default | Purpose |
-| --- | --- | --- |
-| `--force` | Off | Forget the saved choice and run setup again. |
-| `--port` | `8787`, or `PORT` when set | Local port on `127.0.0.1`. |
-| `--log-dir` | `.ai-agent-request-logger/logs` | Where captures are written. |
+| Option      | Default                         | Purpose                                      |
+| ----------- | ------------------------------- | -------------------------------------------- |
+| `--force`   | Off                             | Forget the saved choice and run setup again. |
+| `--port`    | `8787`, or `PORT` when set      | Local port on `127.0.0.1`.                   |
+| `--log-dir` | `.ai-agent-request-logger/logs` | Where captures are written.                  |
 
 ## Limits
 

@@ -57,6 +57,33 @@ func TestResolveCustomPiKeepsTheTypedPathAndModelProvesCustomRoutesTargetTheInte
 	}
 }
 
+// TestResolveOpenCodeGitHubCopilotRoutesThroughProxyAndProvidesAuthSnippet.
+func TestResolveOpenCodeGitHubCopilotRoutesThroughProxyAndProvidesAuthSnippet(t *testing.T) {
+	target, err := ResolveChoice(AgentChoice{Agent: agentOpenCodeID, Provider: "github-copilot"}, 8787)
+	if err != nil {
+		t.Fatalf("ResolveChoice() error = %v", err)
+	}
+	if target.UpstreamHost != "api.githubcopilot.com" {
+		t.Errorf("UpstreamHost = %q, want api.githubcopilot.com", target.UpstreamHost)
+	}
+	if target.BaseURL != "http://localhost:8787" {
+		t.Errorf("BaseURL = %q, want http://localhost:8787", target.BaseURL)
+	}
+	if target.Renderer != RendererOpenAI {
+		t.Errorf("Renderer = %v, want RendererOpenAI", target.Renderer)
+	}
+	foundCommand := false
+	for _, note := range target.Notes {
+		if strings.Contains(note, "apiEndpoint', 'http://localhost:8787')") {
+			foundCommand = true
+			break
+		}
+	}
+	if !foundCommand {
+		t.Errorf("Notes do not contain the sqlite3 configuration command: %#v", target.Notes)
+	}
+}
+
 // TestResolveCustomPiRequiresAModelPreventsBuiltInModelNamesFromLeakingToCustomServers.
 func TestResolveCustomPiRequiresAModelPreventsBuiltInModelNamesFromLeakingToCustomServers(t *testing.T) {
 	_, err := ResolveChoice(AgentChoice{
