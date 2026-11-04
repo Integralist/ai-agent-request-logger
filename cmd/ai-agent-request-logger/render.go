@@ -517,7 +517,7 @@ func renderOpenAIChatMessage(raw any) string {
 		parts = append(parts, renderToolUse(stringValue(function["name"], ""), stringValue(toolCall["id"], ""), fenceJSONText(stringValue(function["arguments"], "{}"))))
 	}
 	if stringValue(message["role"], "") == "tool" {
-		parts = append(parts, "### Tool result for "+stringValue(message["tool_call_id"], "unknown")+"\n\n"+contentText(content))
+		parts = append(parts, renderToolResult(stringValue(message["tool_call_id"], "unknown"), content))
 	}
 	return strings.Join(nonEmpty(parts), "\n\n")
 }
@@ -529,7 +529,7 @@ func renderOpenAIResponseItem(raw any) string {
 	case "function_call":
 		return renderToolUse(stringValue(item["name"], ""), stringValue(item["call_id"], stringValue(item["id"], "")), fenceJSONText(stringValue(item["arguments"], "{}")))
 	case "function_call_output":
-		return "### Tool result for " + stringValue(item["call_id"], "unknown") + "\n\n" + contentText(item["output"])
+		return renderToolResult(stringValue(item["call_id"], "unknown"), item["output"])
 	default:
 		return contentText(item["content"])
 	}
@@ -784,27 +784,55 @@ func renderOpenAIEvents(events []any, raw string) string {
 // renderOpenAIResponsesEvents reconstructs the Responses API event stream.
 func renderOpenAIResponsesEvents(events []any, raw string) string {
 	var text strings.Builder
-	tools := make(map[string]map[string]string)
+	var thinking strings.Builder
+	type toolEntry struct {
+		name      string
+		callID    string
+		arguments string
+	}
+	tools := make(map[int]*toolEntry)
+	toolOrderByIndex := make([]int, 0)
 	var status string
 	for _, value := range events {
 		event := object(value)
-		key := stringValue(event["item_id"], "0")
+		idx := intValue(event["output_index"])
 		switch stringValue(event["type"], "") {
+		case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
+			thinking.WriteString(stringValue(event["delta"], ""))
 		case "response.output_text.delta":
 			text.WriteString(stringValue(event["delta"], ""))
 		case "response.function_call_arguments.delta":
-			if tools[key] == nil {
-				tools[key] = map[string]string{}
+			if tools[idx] == nil {
+				tools[idx] = &toolEntry{}
+				toolOrderByIndex = append(toolOrderByIndex, idx)
 			}
-			tools[key]["arguments"] += stringValue(event["delta"], "")
-		case "response.output_item.added":
+			tools[idx].arguments += stringValue(event["delta"], "")
+		case "response.function_call_arguments.done":
+			if tools[idx] == nil {
+				tools[idx] = &toolEntry{}
+				toolOrderByIndex = append(toolOrderByIndex, idx)
+			}
+			if args := stringValue(event["arguments"], ""); args != "" {
+				tools[idx].arguments = args
+			}
+		case "response.output_item.added", "response.output_item.done":
 			item := object(event["item"])
 			if stringValue(item["type"], "") == "function_call" {
-				key = stringValue(item["id"], key)
-				if tools[key] == nil {
-					tools[key] = map[string]string{}
+				if tools[idx] == nil {
+					tools[idx] = &toolEntry{}
+					toolOrderByIndex = append(toolOrderByIndex, idx)
 				}
-				tools[key]["name"] = stringValue(item["name"], "")
+				if name := stringValue(item["name"], ""); name != "" {
+					tools[idx].name = name
+				}
+				if callID := stringValue(item["call_id"], ""); callID != "" {
+					tools[idx].callID = callID
+				} else if tools[idx].callID == "" && !strings.Contains(stringValue(item["id"], ""), "/") {
+					tools[idx].callID = stringValue(item["id"], "")
+				}
+				if args := stringValue(item["arguments"], ""); args != "" {
+					tools[idx].arguments = args
+				}
 			}
 		case "response.completed":
 			response := object(event["response"])
@@ -815,11 +843,15 @@ func renderOpenAIResponsesEvents(events []any, raw string) string {
 	if status != "" {
 		parts = append(parts, "- **status**: "+status)
 	}
+	if thinking.Len() > 0 {
+		parts = append(parts, foldable("Thinking", renderMarkdownText(thinking.String())))
+	}
 	if text.Len() > 0 {
 		parts = append(parts, foldable("Assistant response", renderMarkdownText(text.String())))
 	}
-	for key, tool := range tools {
-		parts = append(parts, renderToolUse(tool["name"], key, fenceJSONText(defaultString(tool["arguments"], "{}"))))
+	for _, idx := range toolOrderByIndex {
+		tool := tools[idx]
+		parts = append(parts, renderToolUse(tool.name, tool.callID, fenceJSONText(defaultString(tool.arguments, "{}"))))
 	}
 	if len(parts) == 0 {
 		return fence(raw, "")
@@ -905,7 +937,12 @@ func looksLikeSSE(raw string) bool {
 func renderMessageList(messages []any, renderContent func(any) string) string {
 	rendered := make([]string, 0, len(messages))
 	for index, raw := range messages {
-		rendered = append(rendered, messageCard(index+1, messageRole(raw), messageBody(renderContent(raw), messageSourceLines(raw))))
+		role := messageRole(raw)
+		body := renderContent(raw)
+		if role != "tool" && role != "function_call_output" {
+			body = messageBody(body, messageSourceLines(raw))
+		}
+		rendered = append(rendered, messageCard(index+1, role, body))
 	}
 	if len(rendered) == 0 {
 		return ""
@@ -1242,6 +1279,33 @@ func renderToolUse(name, id, arguments string) string {
 		heading += " (`" + id + "`)"
 	}
 	return heading + "\n\n" + foldable("Arguments", arguments)
+}
+
+var ansiPattern = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+
+// renderToolResult formats a tool result under its call heading with a dedicated result box.
+func renderToolResult(callID string, output any) string {
+	heading := "### Tool result"
+	if callID != "" && callID != "unknown" {
+		heading += " for `" + callID + "`"
+	}
+	raw := ""
+	if s, ok := output.(string); ok {
+		raw = s
+	} else if output != nil {
+		if encoded, err := json.MarshalIndent(output, "", "  "); err == nil {
+			raw = string(encoded)
+		} else {
+			raw = fmt.Sprint(output)
+		}
+	}
+	cleaned := ansiPattern.ReplaceAllString(raw, "")
+	lines := lineCount(cleaned)
+	summary := "Result"
+	if lines > longBlockLines {
+		summary = fmt.Sprintf("Result (%d lines)", lines)
+	}
+	return heading + "\n\n" + collapsible(summary, fence(cleaned, ""), lines <= longBlockLines)
 }
 
 // jsonOrText returns parsed JSON when available, otherwise the original text.

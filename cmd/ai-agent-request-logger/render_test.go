@@ -284,3 +284,60 @@ func TestRenderMarkdownFormatsGeminiRequestsAndStreamsKeepsItsDistinctWireShapeR
 		}
 	}
 }
+
+// TestRenderMarkdownFormatsCopilotResponsesEventsWithReasoningAndObfuscatedItemIDs.
+func TestRenderMarkdownFormatsCopilotResponsesEventsWithReasoningAndObfuscatedItemIDs(t *testing.T) {
+	capture := Capture{
+		AgentLabel: "OpenCode", Renderer: RendererOpenAI, Timestamp: time.Now().UTC(), Method: http.MethodPost,
+		Path: "/chat/completions", StatusCode: 200,
+		RequestBody: []byte(`{"model":"gpt-5.6-terra","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`),
+		ResponseBody: []byte("data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"Thinking about this...\",\"output_index\":0}\n" +
+			"data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"id\":\"opaque/base64/id\",\"call_id\":\"call_skill123\",\"name\":\"skill\"}}\n" +
+			"data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":1,\"item_id\":\"another/opaque/id1\",\"delta\":\"{\\\"id\\\":\\\"ex\"}\n" +
+			"data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":1,\"item_id\":\"another/opaque/id2\",\"delta\":\"plain-code\\\"}\"}\n" +
+			"data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_skill123\",\"name\":\"skill\",\"arguments\":\"{\\\"id\\\":\\\"explain-code\\\"}\"}}\n" +
+			"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n"),
+	}
+	markdown := RenderMarkdown(capture)
+	for _, expected := range []string{
+		"<summary>Thinking</summary>",
+		"Thinking about this...",
+		"### Tool call: skill (`call_skill123`)",
+		"<summary>Arguments</summary>",
+		"\"id\": \"explain-code\"",
+		"- **status**: completed",
+	} {
+		if !strings.Contains(markdown, expected) {
+			t.Errorf("Copilot markdown does not contain %q", expected)
+		}
+	}
+	// Verify that the obfuscated base64 IDs do not leak as tool call headings
+	for _, bad := range []string{"opaque/base64/id", "another/opaque/id1", "another/opaque/id2"} {
+		if strings.Contains(markdown, bad) {
+			t.Errorf("Copilot markdown leaked opaque base64 item ID %q", bad)
+		}
+	}
+}
+
+// TestRenderMarkdownFormatsToolResultsWithDedicatedBoxAndStrippedANSI.
+func TestRenderMarkdownFormatsToolResultsWithDedicatedBoxAndStrippedANSI(t *testing.T) {
+	capture := Capture{
+		AgentLabel: "OpenCode", Renderer: RendererOpenAI, Timestamp: time.Now().UTC(), Method: http.MethodPost,
+		Path: "/chat/completions", StatusCode: 200,
+		RequestBody:  []byte(`{"model":"gpt-5.6-terra","input":[{"type":"function_call_output","call_id":"call_abc","output":"\u001b[33mcolored\u001b[m output"}]}`),
+		ResponseBody: []byte(`{"choices":[{"message":{"content":"done"}}]}`),
+	}
+	page := RenderHTML(capture)
+	for _, expected := range []string{
+		"<h3>Tool result for <code>call_abc</code></h3>",
+		"<summary>Result</summary>",
+		"colored output",
+	} {
+		if !strings.Contains(page, expected) {
+			t.Errorf("HTML does not contain %q", expected)
+		}
+	}
+	if strings.Contains(page, "\x1b[33m") || strings.Contains(page, "[33m") {
+		t.Errorf("HTML contains raw ANSI codes")
+	}
+}
