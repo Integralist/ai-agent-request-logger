@@ -110,7 +110,8 @@ that endpoint, enter its model ID manually. A custom `models` list replaces
 Pi's built-in list for that provider, so the snippet names the model you
 selected.
 
-GitHub Copilot is not available through Pi. See [Limits](#limits).
+AWS Bedrock, Google Vertex AI, and GitHub Copilot are not available through Pi.
+See [Limits](#limits).
 
 See Pi's [model configuration][pi-models] and [transport settings][pi-settings]
 documentation.
@@ -187,6 +188,16 @@ calls, such as token counting, are forwarded but not saved.
 
 - **HTTP only.** The proxy cannot capture WebSockets. It replies
   `426 Upgrade Required`, so clients that support fallback retry over HTTP.
+- **AWS Bedrock in Pi cannot be proxied.** Pi communicates with Bedrock using
+  the AWS SDK (`@aws-sdk/client-bedrock-runtime`). AWS SigV4 HMAC request
+  signatures bind to the destination host, which fails when redirected through
+  a local HTTP reverse proxy. Furthermore, Bedrock ConverseStream streaming
+  uses binary AWS EventStream frames (`application/vnd.amazon.eventstream`)
+  rather than text SSE.
+- **Google Vertex AI in Pi is uncatalogued.** Pi connects to regional Vertex
+  endpoints (`{region}-aiplatform.googleapis.com`) via `@google/genai` using
+  Application Default Credentials (ADC). The logger does not offer a route
+  configured for Pi's Vertex adapter.
 - **GitHub Copilot is not offered through Pi.** Pi's GitHub Copilot sign-in
   sends requests to its own Copilot API URL. Setting `baseUrl` in
   `~/.pi/agent/models.json` does not route those requests through the logger,
